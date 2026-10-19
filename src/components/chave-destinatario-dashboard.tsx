@@ -105,6 +105,8 @@ export function ChaveDestinatarioDashboard({
   const [copiedListMsg, setCopiedListMsg] = useState<string | null>(null)
   const [sortBy, setSortBy] = useState<'numero' | 'valor' | 'status'>('status')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
+  const [aiAuditing, setAiAuditing] = useState(false)
+  const [aiAuditMessage, setAiAuditMessage] = useState<string | null>(null)
 
   const [cadastrosVersion, setCadastrosVersion] = useState(0)
   useEffect(() => {
@@ -403,6 +405,30 @@ export function ChaveDestinatarioDashboard({
       })
   }, [items, filterStatus, selectedDestinatario, selectedEmitente, searchTerm, sortBy, sortOrder])
 
+  const handleAiCnpjAudit = async () => {
+    if (items.length === 0 || aiAuditing) return
+    setAiAuditing(true)
+    setAiAuditMessage(null)
+    try {
+      const response = await fetch('/api/gemini/audit-cnpj-recipient', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Falha na auditoria')
+      const results = Array.isArray(data.resultados) ? data.resultados : []
+      const divergentes = results.filter((r: any) => r.veredito === 'DIVERGENTE').length
+      const conformes = results.filter((r: any) => r.veredito === 'CONFORME').length
+      const semDados = results.filter((r: any) => r.veredito === 'NAO_INFORMADO').length
+      setAiAuditMessage(`Auditoria IA concluída: ${conformes} conformes, ${divergentes} divergentes e ${semDados} sem CNPJ confiável. A IA não considera Inscrição Estadual ou dados adicionais como destinatário.`)
+    } catch (error) {
+      setAiAuditMessage(error instanceof Error ? error.message : 'Não foi possível concluir a auditoria IA.')
+    } finally {
+      setAiAuditing(false)
+    }
+  }
+
   // Ações de cópia
   const handleCopyKey = (chave: string) => {
     if (!chave) return
@@ -547,6 +573,16 @@ export function ChaveDestinatarioDashboard({
           <Button
             type="button"
             size="sm"
+            onClick={handleAiCnpjAudit}
+            disabled={items.length === 0 || aiAuditing}
+            className="bg-violet-600 hover:bg-violet-700 text-white text-xs font-semibold flex items-center gap-1.5 shadow-sm cursor-pointer"
+          >
+            {aiAuditing ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+            {aiAuditing ? 'Auditando...' : 'Auditar CNPJ com IA'}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
             onClick={handleExportExcel}
             disabled={items.length === 0}
             className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5 shadow-sm cursor-pointer"
@@ -569,6 +605,14 @@ export function ChaveDestinatarioDashboard({
           )}
         </div>
       </div>
+
+      {aiAuditMessage && (
+        <div className="p-3 bg-violet-50 dark:bg-violet-950/40 border border-violet-200 dark:border-violet-800 rounded-xl text-xs text-violet-900 dark:text-violet-200 flex items-center gap-2">
+          <Sparkles className="h-4 w-4 text-violet-600 shrink-0" />
+          <span>{aiAuditMessage}</span>
+          <button type="button" onClick={() => setAiAuditMessage(null)} className="ml-auto text-violet-600 hover:text-violet-900" aria-label="Fechar resultado da auditoria">×</button>
+        </div>
+      )}
 
       {/* Alerta de Cópia em Lote */}
       {copiedListMsg && (

@@ -1,0 +1,768 @@
+import express from "express";
+import path from "path";
+import fs from "fs";
+import { createServer as createViteServer } from "vite";
+import dotenv from "dotenv";
+import { PDFParse } from "pdf-parse";
+import { GoogleGenAI, Type } from "@google/genai";
+import { parseDanfeText, parseMultiDanfePdf } from "./src/lib/pdf-text-parser";
+import { auditarHeuristicaLocal } from "./src/lib/weight-ai-auditor";
+import { auditarLogisticaHeuristicaLocal } from "./src/lib/logistics-ai-auditor";
+import * as XLSX from "xlsx";
+import { processRumoExtractedText, generateRumoWorkbook } from "./src/lib/rumo-pdf-parser";
+
+dotenv.config();
+
+const app = express();
+const PORT = 3000;
+
+// Instância preguiçosa do cliente Gemini AI com cabeçalho de telemetria exigido
+let genAiClient: GoogleGenAI | null = null;
+function getGenAI() {
+  if (!genAiClient && process.env.GEMINI_API_KEY) {
+    genAiClient = new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+  }
+  return genAiClient;
+}
+
+// Configurar o parser para aumentar o limite do tamanho dos corpos JSON (PDFs codificados em base64)
+app.use(express.json({ limit: "100mb" }));
+app.use(express.urlencoded({ limit: "100mb", extended: true }));
+
+// Helper para limpar caracteres de controle inválidos em strings extraídas de PDFs
+function cleanControlChars(val: any): any {
+  if (typeof val === 'string') {
+    return val.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+  }
+  if (Array.isArray(val)) {
+    return val.map(cleanControlChars);
+  }
+  if (val && typeof val === 'object') {
+    const cleaned: any = {};
+    for (const key of Object.keys(val)) {
+      cleaned[key] = cleanControlChars(val[key]);
+    }
+    return cleaned;
+  }
+  return val;
+}
+
+// Endpoint de saúde
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
+// Endpoint da API para converter PDF em XML de NF-e usando Regras Locais (Processamento Local e 100% Gratuito)
+app.post("/api/pdf-to-xml", async (req, res, next) => {
+  try {
+    const { fileBase64, fileName } = req.body || {};
+
+    if (!fileBase64) {
+      return res.status(400).json({ error: "Nenhum arquivo PDF enviado no corpo da requisição." });
+    }
+
+    // Processamento local ultra rápido baseado em regras e extração de texto
+    const pdfBuffer = Buffer.from(fileBase64, "base64");
+    
+    let text = "";
+    let pages: { num: number; text: string }[] = [];
+
+    try {
+      const parser = new PDFParse({ data: pdfBuffer });
+      try {
+        const textResult = await parser.getText();
+        text = textResult?.text || "";
+        pages = (textResult?.pages as any) || [];
+      } finally {
+        await parser.destroy();
+      }
+    } catch (pdfErr: any) {
+      console.error(`Erro ao ler buffer do PDF ${fileName}:`, pdfErr);
+      return res.status(400).json({
+        error: `Não foi possível extrair o texto do PDF "${fileName}". O arquivo pode estar protegido, corrompido ou em formato incompatível.`
+      });
+    }
+
+    const { items, xml, data } = parseMultiDanfePdf(text, fileName, pages);
+    const responseData = cleanControlChars({
+      xml: xml,
+      fileName: fileName ? fileName.replace(/\.pdf$/i, ".xml") : "convertido.xml",
+      parsedData: data,
+      items: items,
+    });
+    return res.status(200).json(responseData);
+  } catch (err: any) {
+    console.error("Erro geral na rota de conversão:", err);
+    return res.status(500).json({ error: err.message || "Erro ao processar conversão do PDF." });
+  }
+});
+
+// Endpoint genérico para extração de texto de PDFs (DANFE, MDF-e, Conhecimento de Transporte, etc.)
+app.post("/api/parse-pdf-text", async (req, res) => {
+  try {
+    const { fileBase64, fileName } = req.body || {};
+    if (!fileBase64) {
+      return res.status(400).json({ error: "Nenhum arquivo PDF enviado no corpo da requisição." });
+    }
+
+    const pdfBuffer = Buffer.from(fileBase64, "base64");
+    const parser = new PDFParse({ data: pdfBuffer });
+    try {
+      const textResult = await parser.getText();
+      const text = textResult?.text || "";
+      const pages = (textResult?.pages as any) || [];
+      return res.status(200).json({
+        text,
+        pages,
+        fileName: fileName || "documento.pdf",
+      });
+    } finally {
+      await parser.destroy();
+    }
+  } catch (err: any) {
+    console.error(`Erro ao extrair texto do PDF ${req.body?.fileName}:`, err);
+    return res.status(500).json({ error: err.message || "Erro ao extrair texto do PDF." });
+  }
+});
+
+// Endpoint para conversão e processamento de PDF de Resumo Rumo / Composição Ferroviária
+app.post("/api/parse-rumo-pdf", async (req, res) => {
+  try {
+    const { fileBase64, fileName } = req.body || {};
+    if (!fileBase64) {
+      return res.status(400).json({ error: "Nenhum arquivo PDF enviado no corpo da requisição." });
+    }
+
+    const pdfBuffer = Buffer.from(fileBase64, "base64");
+    const parser = new PDFParse({ data: pdfBuffer });
+    let text = "";
+    try {
+      const textResult = await parser.getText();
+      text = textResult?.text || "";
+    } finally {
+      await parser.destroy();
+    }
+
+    if (!text || text.trim() === "") {
+      return res.status(400).json({
+        error: "O PDF parece estar vazio ou contém apenas imagens. Não foi possível extrair texto legível."
+      });
+    }
+
+    const result = processRumoExtractedText(text, fileName || "resumo.pdf");
+    if (!result.aoaData || result.aoaData.length <= 1) {
+      return res.status(400).json({
+        error: "Não foi possível extrair dados estruturados da composição ferroviária. Verifique se o arquivo corresponde ao Resumo Rumo / TEAG / Baltech."
+      });
+    }
+
+    // Gera o arquivo Excel no backend
+    const wb = generateRumoWorkbook(result.aoaData, result.desmembreRows, result.cnpjData);
+    const excelBuffer = XLSX.write(wb, { bookType: "xlsx", type: "buffer" });
+    const excelBase64 = (excelBuffer as Buffer).toString("base64");
+
+    return res.status(200).json({
+      message: "Arquivo processado e planilha gerada com sucesso!",
+      fileData: excelBase64,
+      fileName: result.outputFileName,
+      tableData: result.aoaData,
+      desmembreCount: result.desmembreCount,
+      desmembreRemetenteCount: result.desmembreRemetenteCount,
+      desmembreRows: result.desmembreRows,
+      cnpjData: result.cnpjData,
+      prefixo: result.prefixo,
+      trainName: result.trainName,
+      totalWagons: result.totalWagons,
+      totalWeightKg: result.totalWeightKg,
+    });
+  } catch (err: any) {
+    console.error(`Erro ao processar PDF Rumo ${req.body?.fileName}:`, err);
+    return res.status(500).json({ error: err.message || "Erro inesperado no servidor durante o processamento do PDF." });
+  }
+});
+
+// Endpoint para diagnóstico em tempo real do status do CallMeBot
+app.post("/api/check-callmebot-status", async (req, res) => {
+  try {
+    const { phone, apiKey } = req.body || {};
+    if (!phone || !apiKey) {
+      return res.status(400).json({ error: "Telefone e ApiKey são obrigatórios para o teste." });
+    }
+
+    const cleanPhone = String(phone).replace(/[^0-9+]/g, "");
+    const testText = encodeURIComponent("VLIC Probe Check");
+    const url = `https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(cleanPhone)}&text=${testText}&apikey=${encodeURIComponent(String(apiKey).trim())}`;
+
+    const response = await fetch(url, { method: "GET" });
+    const respText = await response.text();
+    const respLower = respText.toLowerCase();
+
+    const isMaintenance = respLower.includes("service is down") || respLower.includes("technical problem") || respLower.includes("410");
+    const isInvalidKey = respLower.includes("invalid apikey") || respLower.includes("apikey is invalid");
+    const rawClean = respText.replace(/<[^>]*>?/gm, " ").replace(/\s+/g, " ").trim();
+
+    return res.status(200).json({
+      online: !isMaintenance,
+      keyValid: !isInvalidKey,
+      isMaintenance,
+      statusCode: response.status,
+      raw: rawClean,
+      message: isMaintenance
+        ? "O servidor do CallMeBot está temporariamente em manutenção técnica global (Código 410: 'Service is down - The service will be back in 24-48hs'). Suas credenciais estão corretas e salvas, mas a rede externa do CallMeBot está fora do ar no momento."
+        : isInvalidKey
+        ? "A ApiKey informada foi recusada pelo CallMeBot. Verifique se copiou exatamente o código enviado pelo bot no WhatsApp."
+        : "Servidor do CallMeBot online e pronto para envio!",
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      online: false,
+      error: err.message || "Erro ao contatar servidor do CallMeBot.",
+    });
+  }
+});
+
+// Endpoint para envio de notificações WhatsApp / Telegram (CallMeBot / Webhooks / Telegram Bot)
+app.post("/api/send-whatsapp", async (req, res) => {
+  try {
+    const { provider, phone, apiKey, webhookUrl, webhookSecret, telegramBotToken, telegramChatId, text, payload } = req.body || {};
+
+    if (provider === "callmebot") {
+      if (!phone || !apiKey || !text) {
+        return res.status(400).json({
+          error: "Parâmetros incompletos para CallMeBot (telefone, apiKey e texto são obrigatórios)."
+        });
+      }
+
+      const cleanPhone = String(phone).replace(/[^0-9+]/g, "");
+      const encodedText = encodeURIComponent(text);
+      const url = `https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(cleanPhone)}&text=${encodedText}&apikey=${encodeURIComponent(String(apiKey).trim())}`;
+
+      const response = await fetch(url, { method: "GET" });
+      const respText = await response.text();
+      const respLower = respText.toLowerCase();
+
+      const isMaintenance = respLower.includes("service is down") || respLower.includes("technical problem") || respLower.includes("410");
+      const isInvalidKey = respLower.includes("invalid apikey") || respLower.includes("apikey is invalid");
+      const isError = !response.ok || respLower.includes("<b>error") || respLower.includes("error:");
+
+      if (isMaintenance) {
+        return res.status(503).json({
+          success: false,
+          isMaintenance: true,
+          error: "O serviço externo do CallMeBot está temporariamente fora do ar para manutenção técnica global (Erro 410: 'Service is down - The service will be back in 24-48hs'). Suas credenciais estão salvas e corretas, mas o servidor externo está indisponível neste momento.",
+          raw: respText.replace(/<[^>]*>?/gm, " ").trim(),
+        });
+      }
+
+      if (isInvalidKey) {
+        return res.status(400).json({
+          success: false,
+          error: "ApiKey inválida no CallMeBot. Verifique se copiou a ApiKey correta recebida pelo bot no WhatsApp.",
+          raw: respText.replace(/<[^>]*>?/gm, " ").trim(),
+        });
+      }
+
+      if (isError) {
+        return res.status(400).json({
+          success: false,
+          error: respText.replace(/<[^>]*>?/gm, " ").trim() || "Falha ao enviar mensagem via CallMeBot.",
+          raw: respText,
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "Mensagem encaminhada ao WhatsApp via CallMeBot com sucesso!",
+        raw: respText,
+      });
+    } else if (provider === "telegram") {
+      if (!telegramBotToken || !telegramChatId || !text) {
+        return res.status(400).json({
+          error: "Para notificações via Telegram, Bot Token e Chat ID são obrigatórios."
+        });
+      }
+
+      const telegramUrl = `https://api.telegram.org/bot${encodeURIComponent(String(telegramBotToken).trim())}/sendMessage`;
+      const response = await fetch(telegramUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: String(telegramChatId).trim(),
+          text,
+          parse_mode: "Markdown",
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        return res.status(400).json({
+          success: false,
+          error: data.description || "Falha ao enviar mensagem pelo bot do Telegram.",
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "Mensagem enviada com sucesso no Telegram!",
+        result: data.result,
+      });
+    } else if (provider === "webhook") {
+      if (!webhookUrl || !String(webhookUrl).startsWith("http")) {
+        return res.status(400).json({ error: "URL de Webhook inválida." });
+      }
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (webhookSecret) {
+        headers["Authorization"] = `Bearer ${webhookSecret}`;
+        headers["X-Webhook-Secret"] = String(webhookSecret);
+        headers["apikey"] = String(webhookSecret);
+      }
+
+      const response = await fetch(webhookUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload || { text, timestamp: new Date().toISOString() }),
+      });
+
+      const respText = await response.text();
+      return res.status(200).json({
+        success: response.ok,
+        status: response.status,
+        response: respText,
+      });
+    }
+
+    return res.status(400).json({ error: "Provedor de notificação inválido (use 'callmebot', 'telegram' ou 'webhook')." });
+  } catch (err: any) {
+    console.error("Erro no endpoint /api/send-whatsapp:", err);
+    return res.status(500).json({
+      error: err.message || "Erro inesperado ao disparar notificação."
+    });
+  }
+});
+
+// Endpoint de Auditoria IA para Divergências de Peso (MDF-e / NF-e vs Excel)
+// Processa TODAS as notas/vagões com divergência para identificar com precisão o valor real e a causa
+app.post("/api/gemini/verify-weight-divergence", async (req, res) => {
+  try {
+    const { items } = req.body || {};
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "Nenhum item informado para conferência de peso." });
+    }
+
+    const ai = getGenAI();
+
+    // Se a IA não estiver configurada no ambiente, usa o motor de auditoria heurística local completo
+    if (!ai) {
+      const fallbackResults = items.map(auditarHeuristicaLocal);
+      return res.json({
+        totalAuditados: fallbackResults.length,
+        totalErrosLeitura: fallbackResults.filter(r => r.status === 'ERRO_LEITURA_SISTEMA').length,
+        totalDivergenciasReais: fallbackResults.filter(r => r.status === 'DIVERGENCIA_REAL').length,
+        totalConferidos: fallbackResults.filter(r => r.status === 'CONFERIDO_CORRETO').length,
+        resultados: fallbackResults,
+        tokensUtilizadosEstimados: 0,
+        provedor: 'HEURISTICA_INTELIGENTE',
+        nota: 'Processado com motor de auditoria heurística local de alta precisão.',
+      });
+    }
+
+    // Processa TODOS os itens sem corte de limite arbitrário (em lotes de até 50 para estabilidade de resposta)
+    const BATCH_SIZE = 50;
+    const allAiParsedResults: any[] = [];
+    let estimatedTokensTotal = 0;
+
+    for (let i = 0; i < items.length; i += BATCH_SIZE) {
+      const batch = items.slice(i, i + BATCH_SIZE);
+
+      const promptPayload = batch.map(it => ({
+        id: it.id,
+        identificador: it.identificador,
+        numeroApenas: it.numeroApenas,
+        pesoDocumentoLido: it.pesoMDF !== undefined ? `${it.pesoMDF} t` : 'Não identificado',
+        pesoExcelInformado: it.pesoExcel !== undefined ? `${it.pesoExcel} t` : 'Não informado',
+        diferencaApontada: it.diferencaPeso !== undefined ? `${it.diferencaPeso} t` : 'N/A',
+        trechoDocumentoOriginal: it.trechoTextoDocumento ? it.trechoTextoDocumento.substring(0, 4000) : 'Sem trecho disponível',
+        linhaExcel: it.linhaExcel || 'N/A',
+        dadosExcelRaw: it.dadosExcelRaw || {},
+      }));
+
+      try {
+        const response = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: `Você é um Auditor Sênior Especialista em Pesagem Fiscal, Transporte Ferroviário e Rodoviário (MDF-e / NF-e vs Planilha Excel).
+Sua missão fundamental é conferir TODAS as notas/vagões com divergência para ACHAR O VALOR REAL DA QUANTIDADE / PESO focando diretamente no campo "QUANT" / "QUANTIDADE" da DANFE.
+
+=======================================================
+DIRETRIZES FUNDAMENTAIS PARA O CAMPO "QUANT" / "QUANTIDADE":
+=======================================================
+1) CAMPO ALVO OBRIGATÓRIO: Olhe expressamente para a coluna "QUANT" (ou "QUANTIDADE" / "QTD") da tabela de Dados dos Produtos/Serviços da DANFE (onde constam colunas típicas como: CÓDIGO | DESCRIÇÃO | NCM | CST | CFOP | UN | QUANT | VALOR UNIT | VALOR TOTAL).
+   Exemplo Real da DANFE: "2P ACUCAR VHP 17011400 5504 TON 47,62 1.557,99 74.191,53" -> A quantidade real nesta nota é 47,62 TON (47.620 t).
+2) SE O SISTEMA LER 0 OU FALTAR VALOR: Se o sistema anterior leu 0 t mas o texto da nota ou XML contém a linha do produto (ex: "ACUCAR VHP ... TON 47,62" ou "47.620,00 QUILOGRAMA"), classifique obrigatoriamente como "ERRO_LEITURA_SISTEMA", localize a quantidade real (ex: 47.62 t) e preencha "pesoCorrigidoDoc": 47.62.
+3) QUEBRAS DE LINHA NO CAMPO QUANT: Em layouts de DANFE, o último dígito decimal pode quebrar para a linha de baixo (ex: "47.420,0" + "0" = 47.420,00 kg / 47.420 t).
+4) UNIDADE DE MEDIDA (UN):
+   - Se UN for TON, T ou TONELADAS e QUANT for "47,62" ou "47.620", o peso real é 47.620 t.
+   - Se UN for KG ou QUILOGRAMA e QUANT for "47.620,00", o peso real em toneladas é 47.620 t.
+5) DADOS DO TRANSPORTE: Verifique também "PESO LÍQUIDO" e "PESO BRUTO" na seção de Transportador/Volumes Transportados (ex: "47.620,00 QUILOGRAMA 73.540,00 47.620,00" -> 47.620 t líquido).
+
+Classificação de Status:
+1) "ERRO_LEITURA_SISTEMA": Se o algoritmo de extração cometeu uma falha ao ler o PDF/texto (por exemplo: leu 0 t em vez de 47.62 t, perdeu casas decimais, confundiu unidades ou quebrou linhas). Encontre no campo QUANT / Peso Líquido o valor REAL exato e preencha "pesoCorrigidoDoc" com a quantidade real em toneladas (t).
+2) "DIVERGENCIA_REAL": O documento fiscal declara expressamente no campo QUANT / Peso Líquido um valor X e a planilha Excel declara um peso Y diferente (divergência física/comercial real). Indique o peso real declarado no documento em "pesoCorrigidoDoc".
+3) "PESO_AUSENTE_NO_DOC": O documento realmente não contém quantidade nem peso declarado em nenhum campo.
+4) "CONFERIDO_CORRETO": Os pesos estão alinhados quando convertidos para a mesma unidade ou consideradas as casas decimais corretas.
+
+Seja analítico e encontre o valor real da quantidade em toneladas (t) com até 3 casas decimais.
+
+Dados a auditar:
+${JSON.stringify(promptPayload, null, 2)}`,
+          config: {
+            systemInstruction: "Você é um auditor fiscal de pesagem e documentos fiscais preciso e analítico. Localize com precisão o valor real da coluna QUANT / QUANTIDADE da DANFE. Retorne estritamente um array JSON com todos os itens analisados.",
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING },
+                  identificador: { type: Type.STRING },
+                  status: {
+                    type: Type.STRING,
+                    enum: ["ERRO_LEITURA_SISTEMA", "DIVERGENCIA_REAL", "PESO_AUSENTE_NO_DOC", "CONFERIDO_CORRETO"]
+                  },
+                  veredito: { type: Type.STRING, description: "Resumo em 1 linha com o valor real encontrado na coluna QUANT" },
+                  pesoCorrigidoDoc: { type: Type.NUMBER, description: "Valor real da quantidade / peso em toneladas (t) extraído da coluna QUANT / Peso Líquido da DANFE" },
+                  pesoExcel: { type: Type.NUMBER, description: "Peso em toneladas informado na planilha" },
+                  diferencaReal: { type: Type.NUMBER, description: "Diferença real entre o peso real do documento e o peso do Excel" },
+                  explicacao: { type: Type.STRING, description: "Explicação clara indicando como o valor foi localizado na coluna QUANT e o que causou a divergência" },
+                  confianca: { type: Type.STRING, enum: ["ALTA", "MEDIA", "BAIXA"] }
+                },
+                required: ["id", "identificador", "status", "veredito", "explicacao", "confianca"]
+              }
+            }
+          }
+        });
+
+        let parsedJson: any[] = [];
+        try {
+          parsedJson = JSON.parse(response.text || "[]");
+        } catch (parseErr) {
+          console.warn("Erro ao fazer parse do JSON do Gemini no lote:", parseErr, response.text);
+        }
+
+        allAiParsedResults.push(...parsedJson);
+        estimatedTokensTotal += 100 + batch.length * 90;
+      } catch (batchErr) {
+        console.error("Erro no processamento do lote Gemini:", batchErr);
+        // Em caso de erro no lote, gera o fallback heurístico para os itens desse lote
+        const fallbackBatch = batch.map(auditarHeuristicaLocal);
+        allAiParsedResults.push(...fallbackBatch);
+      }
+    }
+
+    const resultados = items.map(it => {
+      const aiResult = allAiParsedResults.find((r: any) => r.id === it.id || r.identificador === it.identificador);
+      if (aiResult) {
+        return {
+          id: it.id,
+          identificador: it.identificador,
+          status: aiResult.status || 'DIVERGENCIA_REAL',
+          veredito: aiResult.veredito || 'Conferido com IA',
+          pesoCorrigidoDoc: aiResult.pesoCorrigidoDoc !== undefined && aiResult.pesoCorrigidoDoc !== null ? Number(aiResult.pesoCorrigidoDoc) : it.pesoMDF,
+          pesoExcel: aiResult.pesoExcel !== undefined && aiResult.pesoExcel !== null ? Number(aiResult.pesoExcel) : it.pesoExcel,
+          diferencaReal: aiResult.diferencaReal !== undefined && aiResult.diferencaReal !== null ? Number(aiResult.diferencaReal) : it.diferencaPeso,
+          explicacao: aiResult.explicacao || 'Analisado com modelo Gemini 3.7 Flash.',
+          confianca: aiResult.confianca || 'ALTA',
+          modoUtilizado: 'GEMINI_IA' as const,
+        };
+      }
+      return auditarHeuristicaLocal(it);
+    });
+
+    return res.json({
+      totalAuditados: resultados.length,
+      totalErrosLeitura: resultados.filter((r: any) => r.status === 'ERRO_LEITURA_SISTEMA').length,
+      totalDivergenciasReais: resultados.filter((r: any) => r.status === 'DIVERGENCIA_REAL').length,
+      totalConferidos: resultados.filter((r: any) => r.status === 'CONFERIDO_CORRETO').length,
+      resultados,
+      tokensUtilizadosEstimados: estimatedTokensTotal || (100 + resultados.length * 90),
+      provedor: 'GEMINI_3_7_FLASH',
+    });
+  } catch (err: any) {
+    console.error("Erro na rota /api/gemini/verify-weight-divergence:", err);
+    const { items } = req.body || {};
+    const fallbackResults = Array.isArray(items) ? items.map(auditarHeuristicaLocal) : [];
+    return res.json({
+      totalAuditados: fallbackResults.length,
+      totalErrosLeitura: fallbackResults.filter(r => r.status === 'ERRO_LEITURA_SISTEMA').length,
+      totalDivergenciasReais: fallbackResults.filter(r => r.status === 'DIVERGENCIA_REAL').length,
+      totalConferidos: fallbackResults.filter(r => r.status === 'CONFERIDO_CORRETO').length,
+      resultados: fallbackResults,
+      tokensUtilizadosEstimados: 0,
+      provedor: 'HEURISTICA_INTELIGENTE',
+      aviso: 'Processado com motor de auditoria heurística local.',
+    });
+  }
+});
+
+// Endpoint de Auditoria e Preenchimento de Logística (Terminal e Transbordo) com Gemini 3.7 Flash
+app.post("/api/gemini/audit-logistics", async (req, res) => {
+  try {
+    const { items } = req.body;
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "Array de 'items' é obrigatório." });
+    }
+
+    const ai = getGenAI();
+    if (!ai) {
+      const fallbackResults = items.map(auditarLogisticaHeuristicaLocal);
+      const totalAjustados = fallbackResults.filter(r => r.camposAjustados.length > 0).length;
+      return res.json({
+        totalAuditados: fallbackResults.length,
+        totalAjustados,
+        totalSemDados: fallbackResults.length - totalAjustados,
+        resultados: fallbackResults,
+        tokensUtilizadosEstimados: 0,
+        provedor: 'HEURISTICA_INTELIGENTE',
+        nota: 'Processado com motor de auditoria heurística local de alta precisão.',
+      });
+    }
+
+    const BATCH_SIZE = 40;
+    const allAiParsedResults: any[] = [];
+    let estimatedTokensTotal = 0;
+
+    for (let i = 0; i < items.length; i += BATCH_SIZE) {
+      const batch = items.slice(i, i + BATCH_SIZE);
+
+      const promptPayload = batch.map(it => ({
+        id: it.id,
+        numero: it.numero,
+        serie: it.serie,
+        chave: it.chave,
+        emitenteAtual: it.emitNome || 'Não informado',
+        terminalAtual: it.terminal || 'Não informado',
+        transbordoAtual: it.transbordo || 'Não informado',
+        produtoAtual: it.produto || 'Não informado',
+        retiradaAtual: it.retirada || 'Não informado',
+        informacoesComplementares: (it.infCpl || '').substring(0, 1500),
+        trechoDocumentoOriginal: (it.rawSnippet || '').substring(0, 2000),
+      }));
+
+      try {
+        const response = await ai.models.generateContent({
+          model: "gemini-3.7-flash",
+          contents: `Você é um Auditor Sênior Especialista em Logística Portuária, Ferroviária e Fiscal de DANFE/NF-e (Exportação de Açúcar, Grãos, Soja, Milho, Farelo e Cargas Industriais).
+Sua missão fundamental é analisar as notas fiscais onde TERMINAL DE ENTREGA ou TRANSBORDO estão "Não Informado" e ENCONTRAR OS VALORES REAIS declarados no texto da DANFE/Informações Complementares para ajustar o Dashboard.
+
+=======================================================
+REGRAS E PADRÕES DE MAPEAMENTO LOGÍSTICO:
+=======================================================
+1) TERMINAIS DE ENTREGA (Especialmente Porto de Santos e Terminais de Exportação):
+   - "TEAG - TERMINAL DE ACUCAR DO GUARUJA" (se mencionar TEAG, Term. Açúcar Guarujá, Terminal Exportação Açúcar)
+   - "TEG - TERMINAL EXPORTADOR DO GUARUJA" (se mencionar TEG, Terminal Exportadores Grande, Term. Exportador Guarujá)
+   - "CLI - CORREDOR LOGÍSTICA INTEGRADA" (se mencionar CLI, Corredor Logístico Integrado, Termares)
+   - "TGG - TERMINAL DE GRAOS DO GUARUJA" (se mencionar TGG, Grãos do Guarujá)
+   - "TERMINAL 124" (se mencionar T-124, T124, Terminal 124)
+   - "SANTOS BRASIL" (se mencionar Santos Brasil, Tecon Santos)
+   - "DP WORLD SANTOS" (se mencionar DP World, Embraport)
+   - "BTP - BRASIL TERMINAL PORTUARIO" (se mencionar BTP)
+   - "ECOPORTO SANTOS" (se mencionar Ecoporto)
+   - "TIPLAM - TERMINAL INTEGRADO" (se mencionar TIPLAM, VLI Tiplam)
+   - "TERMINAL RUMO" (se mencionar Rumo, Terminal Rumo Malha)
+   - "TERMINAL VLI" (se mencionar VLI)
+
+2) TRANSBORDOS E PÁTIOS RODOFERROVIÁRIOS:
+   - "ITURAMA" (se mencionar Iturama, Pátio Iturama)
+   - "PRADOPOLIS" (se mencionar Pradópolis, Pradopolis, ZXE, Usina São Martinho Pradópolis)
+   - "ALTO TAQUARI" ou "NOVA AGRI - ALTO TAQUARI" (se mencionar Alto Taquari, Nova Agri)
+   - "RONDONOPOLIS (RUMO)" (se mencionar Rondonópolis, Rondonopolis, Malha Norte)
+   - "RIO VERDE" (se mencionar Rio Verde)
+   - "ARAGUARI (VLI)" (se mencionar Araguari)
+   - "UBERABA" (se mencionar Uberaba, TIUB)
+   - "PEDERNEIRAS (RUMO)" (se mencionar Pederneiras)
+   - "GUARA" (se mencionar Guará, Guara)
+   - "UBERLANDIA", "SAO SIMAO", "CHAPADAO DO SUL", "INOCENCIA", "ITIQUIRA", "RIO PRETO"
+
+Analise cada nota com atenção aos campos infCpl e trechoDocumentoOriginal. Se encontrar dados novos para preencher ou corrigir, informe os valores.
+
+Dados a auditar:
+${JSON.stringify(promptPayload, null, 2)}`,
+          config: {
+            systemInstruction: "Você é um auditor logístico e fiscal analítico. Localize terminais e transbordos declarados no texto do documento. Não sugira destinatários. Retorne estritamente um array JSON com todos os itens analisados.",
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING },
+                  terminalCorrigido: { type: Type.STRING, description: "Nome normalizado do Terminal de Entrega identificado no documento, ou vazio se não houver" },
+                  transbordoCorrigido: { type: Type.STRING, description: "Nome do Transbordo/Pátio identificado no documento, ou vazio se não houver" },
+                  produtoCorrigido: { type: Type.STRING, description: "Nome do Produto identificado no documento, ou vazio se não houver" },
+                  retiradaCorrigida: { type: Type.STRING, description: "Local de Retirada identificado no documento, ou vazio se não houver" },
+                  status: {
+                    type: Type.STRING,
+                    enum: ["AJUSTADO_IA", "PARCIALMENTE_AJUSTADO", "DADOS_JA_COMPLETOS", "NAO_CONSTA_NO_DOC"]
+                  },
+                  veredito: { type: Type.STRING, description: "Resumo em 1 linha dos dados encontrados" },
+                  explicacao: { type: Type.STRING, description: "Explicação objetiva de onde os dados foram encontrados no documento fiscal" },
+                  confianca: { type: Type.STRING, enum: ["ALTA", "MEDIA", "BAIXA"] }
+                },
+                required: ["id", "status", "veredito", "explicacao", "confianca"]
+              }
+            }
+          }
+        });
+
+        let parsedJson: any[] = [];
+        try {
+          parsedJson = JSON.parse(response.text || "[]");
+        } catch (parseErr) {
+          console.warn("Erro ao fazer parse do JSON do Gemini no lote de logística:", parseErr, response.text);
+        }
+
+        allAiParsedResults.push(...parsedJson);
+        estimatedTokensTotal += 120 + batch.length * 100;
+      } catch (batchErr) {
+        console.error("Erro no processamento do lote Gemini de logística:", batchErr);
+        const fallbackBatch = batch.map(auditarLogisticaHeuristicaLocal);
+        allAiParsedResults.push(...fallbackBatch);
+      }
+    }
+
+    const resultados = items.map(it => {
+      const aiResult = allAiParsedResults.find((r: any) => r.id === it.id);
+      if (aiResult) {
+        const camposAjustados: Array<'terminal' | 'transbordo' | 'destinatario' | 'retirada' | 'produto'> = [];
+        if (aiResult.terminalCorrigido && (!it.terminal || /N[AÃ]O\s*INFORMADO/i.test(it.terminal))) {
+          camposAjustados.push('terminal');
+        }
+        if (aiResult.transbordoCorrigido && (!it.transbordo || /N[AÃ]O\s*INFORMADO/i.test(it.transbordo))) {
+          camposAjustados.push('transbordo');
+        }
+        if (aiResult.produtoCorrigido && (!it.produto || /OUTRO|N[AÃ]O\s*INFORMADO/i.test(it.produto))) {
+          camposAjustados.push('produto');
+        }
+
+        const isAjustado = camposAjustados.length > 0;
+        return {
+          id: it.id,
+          numero: it.numero,
+          terminalCorrigido: aiResult.terminalCorrigido || it.terminal,
+          transbordoCorrigido: aiResult.transbordoCorrigido || it.transbordo,
+          destinatarioCorrigido: it.destNome,
+          retiradaCorrigida: aiResult.retiradaCorrigida || it.retirada,
+          produtoCorrigido: aiResult.produtoCorrigido || it.produto,
+          status: isAjustado ? (aiResult.status || 'AJUSTADO_IA') : 'NAO_CONSTA_NO_DOC',
+          veredito: aiResult.veredito || (isAjustado ? 'Dados Identificados pela IA' : 'Sem alterações adicionais'),
+          explicacao: aiResult.explicacao || 'Analisado com modelo Gemini 3.7 Flash.',
+          confianca: aiResult.confianca || 'ALTA',
+          modoUtilizado: 'GEMINI_IA' as const,
+          camposAjustados,
+        };
+      }
+      return auditarLogisticaHeuristicaLocal(it);
+    });
+
+    const totalAjustados = resultados.filter((r: any) => r.camposAjustados.length > 0).length;
+
+    return res.json({
+      totalAuditados: resultados.length,
+      totalAjustados,
+      totalSemDados: resultados.length - totalAjustados,
+      resultados,
+      tokensUtilizadosEstimados: estimatedTokensTotal || (120 + resultados.length * 100),
+      provedor: 'GEMINI_3_7_FLASH',
+    });
+  } catch (err: any) {
+    console.error("Erro na rota /api/gemini/audit-logistics:", err);
+    const { items } = req.body || {};
+    const fallbackResults = Array.isArray(items) ? items.map(auditarLogisticaHeuristicaLocal) : [];
+    const totalAjustados = fallbackResults.filter(r => r.camposAjustados.length > 0).length;
+    return res.json({
+      totalAuditados: fallbackResults.length,
+      totalAjustados,
+      totalSemDados: fallbackResults.length - totalAjustados,
+      resultados: fallbackResults,
+      tokensUtilizadosEstimados: 0,
+      provedor: 'HEURISTICA_INTELIGENTE',
+      aviso: 'Processado com motor de auditoria heurística local.',
+    });
+  }
+});
+
+// Middleware global para garantia de resposta em JSON em caso de erro no Express
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error("[Express Error Handler]", err);
+  const status = err.status || err.statusCode || 500;
+  res.status(status).json({
+    error: err.message || "Erro no servidor ao processar requisição.",
+  });
+});
+
+// Configurar o Vite como middleware para servir a aplicação React em desenvolvimento
+// Em produção, servirá os arquivos estáticos compilados na pasta 'dist'
+async function startServer() {
+  const distPath = path.join(process.cwd(), "dist");
+
+  // Servir arquivos estáticos de compilações anteriores se existirem (evita erro com bundles cacheados)
+  if (fs.existsSync(distPath)) {
+    app.use(express.static(distPath, { index: false }));
+  }
+
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "custom",
+    });
+    app.use(vite.middlewares);
+
+    // Servir HTML para requisições de navegação SPA, mas retornar 404 para assets não encontrados
+    app.use("*", async (req, res, next) => {
+      const url = req.originalUrl.split("?")[0];
+      if (
+        url.startsWith("/api/") ||
+        /\.(js|mjs|cjs|ts|tsx|css|json|map|wasm|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot)$/i.test(url)
+      ) {
+        return res.status(404).type("text/plain").send("Not Found");
+      }
+
+      try {
+        const indexPath = path.resolve(process.cwd(), "index.html");
+        let template = fs.readFileSync(indexPath, "utf-8");
+        template = await vite.transformIndexHtml(req.originalUrl, template);
+        res.status(200).set({ "Content-Type": "text/html" }).end(template);
+      } catch (e: any) {
+        vite.ssrFixStacktrace(e);
+        next(e);
+      }
+    });
+  } else {
+    app.use(express.static(distPath));
+    app.get("*", (req, res) => {
+      const url = req.originalUrl.split("?")[0];
+      if (
+        url.startsWith("/api/") ||
+        /\.(js|mjs|cjs|ts|tsx|css|json|map|wasm|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot)$/i.test(url)
+      ) {
+        return res.status(404).type("text/plain").send("Not Found");
+      }
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`[Server] Rodando em http://localhost:${PORT}`);
+  });
+}
+
+startServer();

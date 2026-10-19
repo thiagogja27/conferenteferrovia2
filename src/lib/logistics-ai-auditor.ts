@@ -1,0 +1,360 @@
+import { sanitizeDestinatarioNome } from './destinatario-utils'
+import { getExplicitGuarujaTerminalCode } from './terminal-utils'
+
+export interface LogisticsAuditInputItem {
+  id: string
+  numero?: string
+  serie?: string
+  chave?: string
+  emitNome?: string
+  destNome?: string
+  destCNPJ?: string
+  terminal?: string
+  transbordo?: string
+  produto?: string
+  retirada?: string
+  infCpl?: string
+  rawSnippet?: string
+  xmlContent?: string
+}
+
+export type LogisticsStatusTipo =
+  | 'AJUSTADO_IA'
+  | 'PARCIALMENTE_AJUSTADO'
+  | 'DADOS_JA_COMPLETOS'
+  | 'NAO_CONSTA_NO_DOC'
+
+export interface LogisticsAuditResultItem {
+  id: string
+  numero?: string
+  terminalCorrigido?: string
+  transbordoCorrigido?: string
+  destinatarioCorrigido?: string
+  retiradaCorrigida?: string
+  produtoCorrigido?: string
+  status: LogisticsStatusTipo
+  veredito: string
+  explicacao: string
+  confianca: 'ALTA' | 'MEDIA' | 'BAIXA'
+  modoUtilizado: 'GEMINI_IA' | 'HEURISTICA_LOCAL'
+  camposAjustados: Array<'terminal' | 'transbordo' | 'destinatario' | 'retirada' | 'produto'>
+}
+
+export interface LogisticsAuditResponse {
+  totalAuditados: number
+  totalAjustados: number
+  totalSemDados: number
+  resultados: LogisticsAuditResultItem[]
+  tokensUtilizadosEstimados?: number
+  provedor: 'GEMINI_3_7_FLASH' | 'HEURISTICA_INTELIGENTE'
+}
+
+export interface NoteLogisticsOverride {
+  terminal?: string
+  transbordo?: string
+  destNome?: string
+  retirada?: string
+  produto?: string
+  auditResult?: LogisticsAuditResultItem
+  appliedAt?: string
+}
+
+// ----------------------------------------------------
+// Heurística Local Especializada para Logística DANFE
+// ----------------------------------------------------
+
+function isNaoInformado(val?: string | null): boolean {
+  if (!val) return true
+  const norm = val.trim().toUpperCase()
+  return (
+    norm === '' ||
+    norm === 'NÃO INFORMADO' ||
+    norm === 'NAO INFORMADO' ||
+    norm === 'NÃO INFORMADA' ||
+    norm === 'NAO INFORMADA' ||
+    norm === 'NÃO IDENTIFICADO' ||
+    norm === 'NAO IDENTIFICADO' ||
+    norm === 'DESTINATÁRIO NÃO IDENTIFICADO' ||
+    norm === 'DESTINATARIO NAO IDENTIFICADO' ||
+    norm === 'OUTRO' ||
+    norm === 'OUTROS' ||
+    norm === '-'
+  )
+}
+
+export function auditarLogisticaHeuristicaLocal(item: LogisticsAuditInputItem): LogisticsAuditResultItem {
+  const fullText = `${item.infCpl || ''} ${item.rawSnippet || ''} ${item.xmlContent || ''} ${item.emitNome || ''} ${item.destNome || ''}`.toUpperCase()
+  const camposAjustados: Array<'terminal' | 'transbordo' | 'destinatario' | 'retirada' | 'produto'> = []
+  
+  let terminalCorrigido = item.terminal
+  let transbordoCorrigido = item.transbordo
+  let destinatarioCorrigido = item.destNome
+  let retiradaCorrigida = item.retirada
+  let produtoCorrigido = item.produto
+  const explicitTerminalCode = getExplicitGuarujaTerminalCode(fullText)
+  if (explicitTerminalCode) {
+    terminalCorrigido = explicitTerminalCode === 'TEAG'
+      ? 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
+      : 'TEG - TERMINAL EXPORTADOR DO GUARUJA'
+    if (terminalCorrigido !== item.terminal) camposAjustados.push('terminal')
+  }
+
+  // Se o terminal foi indevidamente gravado como um transbordo (ex: UBERABA, TIUB, ATT ARMAZENAGEM, FERNANDOPOLIS):
+  if (/UBERABA|TIUB/i.test(item.terminal || '')) {
+    if (isNaoInformado(item.transbordo) || item.transbordo === item.terminal) {
+      transbordoCorrigido = 'UBERABA'
+      camposAjustados.push('transbordo')
+    }
+    terminalCorrigido = 'Não Informado'
+  } else if (/ATT\s*ARMAZENAGEM|FERNAND[OÓ]POLIS/i.test(item.terminal || '')) {
+    if (isNaoInformado(item.transbordo) || item.transbordo === item.terminal) {
+      transbordoCorrigido = 'FERNANDOPOLIS'
+      camposAjustados.push('transbordo')
+    }
+    terminalCorrigido = 'Não Informado'
+  }
+
+  // Se o transbordo foi indevidamente rotulado como terminal portuário (ex: TEAG, TEG, TES, CLI, TGG, SANTOS, GUARUJÁ):
+  if (/^TEAG\b|^TEG\b|^TES\b|^CLI\b|^TGG\b|^TIPLAM\b|^BTP\b|SANTOS|GUARUJ[AÁ]/i.test(item.transbordo || '')) {
+    if (isNaoInformado(terminalCorrigido) || isNaoInformado(item.terminal)) {
+      terminalCorrigido = item.transbordo
+      camposAjustados.push('terminal')
+    }
+    transbordoCorrigido = undefined
+  }
+
+  // Se o terminal foi rotulado como TEG mas a nota é de açúcar ou possui dados do TEAG, corrigir para TEAG
+  if (!explicitTerminalCode && item.terminal && item.terminal.includes('TEG') && !item.terminal.includes('TEAG')) {
+    if (/ACUCAR|AÇÚCAR|04\.?721\.?589\/?0001-?78|BENTO\s*PEDRO|335\.?127\.?598\.?119|TERMINAL.*EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR/i.test(fullText)) {
+      terminalCorrigido = 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
+      camposAjustados.push('terminal')
+    }
+  }
+
+  // 1. Auditoria e Identificação de Terminal de Entrega
+  if (!explicitTerminalCode && (isNaoInformado(terminalCorrigido) || isNaoInformado(item.terminal))) {
+    if (
+      /\bTEAG\b|TERMINAL.*EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR|ACUCAR.*GUARUJ[AÁ]|TEAG|04\.?721\.?589\/?0001-?78|335\.?127\.?598\.?119|BENTO\s*PEDRO\s*DA\s*COSTA/i.test(fullText) ||
+      ((/GUARUJ[AÁ]/i.test(fullText)) && (/ACUCAR|AÇÚCAR/i.test(fullText)))
+    ) {
+      terminalCorrigido = 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
+      camposAjustados.push('terminal')
+    } else if (/\bTES\b|TERMINAL.*EXPORTADOR.*SANTOS|TES\s*TERMINAL|18\.?845\.?076\/?0001-?83/i.test(fullText)) {
+      terminalCorrigido = 'TES - TERMINAL EXPORTADOR DE SANTOS'
+      camposAjustados.push('terminal')
+    } else if (/\bTEG\b|TERMINAL.*EXPORTADOR.*GUARUJ[AÁ]|TERM.*EXP.*GUARUJA/i.test(fullText)) {
+      terminalCorrigido = 'TEG - TERMINAL EXPORTADOR DO GUARUJA'
+      camposAjustados.push('terminal')
+    } else if (/\bCLI\b|CORREDOR.*LOG[IÍ]STIC.*INTEGRAD/i.test(fullText)) {
+      terminalCorrigido = 'CLI - CORREDOR LOGÍSTICA INTEGRADA'
+      camposAjustados.push('terminal')
+    } else if (/\bTGG\b|TERMINAL.*GR[AÃ]OS.*GUARUJ[AÁ]/i.test(fullText)) {
+      terminalCorrigido = 'TGG - TERMINAL DE GRAOS DO GUARUJA'
+      camposAjustados.push('terminal')
+    } else if (/\bT-124\b|\bT124\b|TERMINAL.*124/i.test(fullText)) {
+      terminalCorrigido = 'TERMINAL 124'
+      camposAjustados.push('terminal')
+    } else if (/SANTOS BRASIL/i.test(fullText)) {
+      terminalCorrigido = 'SANTOS BRASIL'
+      camposAjustados.push('terminal')
+    } else if (/DP WORLD/i.test(fullText)) {
+      terminalCorrigido = 'DP WORLD SANTOS'
+      camposAjustados.push('terminal')
+    } else if (/ECOPORTO/i.test(fullText)) {
+      terminalCorrigido = 'ECOPORTO SANTOS'
+      camposAjustados.push('terminal')
+    } else if (/BTP|BRASIL TERMINAL PORTU/i.test(fullText)) {
+      terminalCorrigido = 'BTP - BRASIL TERMINAL PORTUARIO'
+      camposAjustados.push('terminal')
+    } else if (/TIPLAM/i.test(fullText)) {
+      terminalCorrigido = 'TIPLAM - TERMINAL INTEGRADO'
+      camposAjustados.push('terminal')
+    } else if (/TERMINAL RUMO|RUMO MALHA/i.test(fullText)) {
+      terminalCorrigido = 'TERMINAL RUMO'
+      camposAjustados.push('terminal')
+    } else if (/TERMINAL VLI|VLI/i.test(fullText)) {
+      terminalCorrigido = 'TERMINAL VLI'
+      camposAjustados.push('terminal')
+    } else if (/GUARUJ[AÁ]/i.test(fullText)) {
+      if (/ACUCAR|AÇÚCAR/i.test(fullText)) {
+        terminalCorrigido = 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
+      } else {
+        terminalCorrigido = 'TEG - TERMINAL EXPORTADOR DO GUARUJA'
+      }
+      camposAjustados.push('terminal')
+    }
+  }
+
+  // 2. Auditoria e Identificação de Transbordo (Validação prioritária de Pradópolis, Pederneiras e outros cadastrados)
+  const isTransbordoInvalidoOuVazio =
+    isNaoInformado(transbordoCorrigido) ||
+    isNaoInformado(item.transbordo) ||
+    /^TEAG\b|^TEG\b|^TES\b|^CLI\b|^TGG\b|^TIPLAM\b|^BTP\b|SANTOS|GUARUJ[AÁ]/i.test(transbordoCorrigido || item.transbordo || '')
+
+  if (isTransbordoInvalidoOuVazio) {
+    if (/PRAD[OÓ]POLIS|SAO\s*MARTINHO|SÃO\s*MARTINHO/i.test(fullText)) {
+      transbordoCorrigido = 'PRADOPOLIS'
+      camposAjustados.push('transbordo')
+    } else if (/PEDERNEIRAS/i.test(fullText)) {
+      transbordoCorrigido = 'PEDERNEIRAS (RUMO)'
+      camposAjustados.push('transbordo')
+    } else if (/FERNAND[OÓ]POLIS|ATT\s*ARMAZENAGEM|72\.?451\.?917\/?0016-?08/i.test(fullText)) {
+      transbordoCorrigido = 'FERNANDOPOLIS'
+      camposAjustados.push('transbordo')
+    } else if (/ITURAMA/i.test(fullText)) {
+      transbordoCorrigido = 'ITURAMA'
+      camposAjustados.push('transbordo')
+    } else if (/UBERABA|TIUB/i.test(fullText)) {
+      transbordoCorrigido = 'UBERABA'
+      camposAjustados.push('transbordo')
+    } else if (/NOVA\s*AGRI|NOVAAGRI/i.test(fullText)) {
+      transbordoCorrigido = 'NOVA AGRI - ALTO TAQUARI'
+      camposAjustados.push('transbordo')
+    } else if (/ALTO\s*TAQUARI/i.test(fullText)) {
+      transbordoCorrigido = 'ALTO TAQUARI'
+      camposAjustados.push('transbordo')
+    } else if (/RONDON[OÓ]POLIS/i.test(fullText)) {
+      transbordoCorrigido = 'RONDONOPOLIS (RUMO)'
+      camposAjustados.push('transbordo')
+    } else if (/RIO\s*VERDE/i.test(fullText)) {
+      transbordoCorrigido = 'RIO VERDE'
+      camposAjustados.push('transbordo')
+    } else if (/ARAGUARI/i.test(fullText)) {
+      transbordoCorrigido = 'ARAGUARI (VLI)'
+      camposAjustados.push('transbordo')
+    } else if (/UBERABA|TIUB/i.test(fullText)) {
+      transbordoCorrigido = 'UBERABA'
+      camposAjustados.push('transbordo')
+    } else if (/PEDERNEIRAS/i.test(fullText)) {
+      transbordoCorrigido = 'PEDERNEIRAS (RUMO)'
+      camposAjustados.push('transbordo')
+    } else if (/GUAR[AÁ]/i.test(fullText)) {
+      transbordoCorrigido = 'GUARA'
+      camposAjustados.push('transbordo')
+    } else if (/UBERL[AÂ]NDIA/i.test(fullText)) {
+      transbordoCorrigido = 'UBERLANDIA'
+      camposAjustados.push('transbordo')
+    } else if (/S[AÃ]O\s*SIM[AÃ]O/i.test(fullText)) {
+      transbordoCorrigido = 'SAO SIMAO'
+      camposAjustados.push('transbordo')
+    } else if (/CHAPAD[AÃ]O\s*DO\s*SUL/i.test(fullText)) {
+      transbordoCorrigido = 'CHAPADAO DO SUL'
+      camposAjustados.push('transbordo')
+    } else if (/INOC[EÊ]NCIA/i.test(fullText)) {
+      transbordoCorrigido = 'INOCENCIA'
+      camposAjustados.push('transbordo')
+    } else if (/ITIQUIRA/i.test(fullText)) {
+      transbordoCorrigido = 'ITIQUIRA'
+      camposAjustados.push('transbordo')
+    }
+  }
+
+  // 3. Auditoria e Identificação de Destinatário
+  const cleanDest = sanitizeDestinatarioNome(item.destNome, item.destCNPJ, fullText)
+  if (isNaoInformado(item.destNome) || (item.destNome && item.destNome !== cleanDest)) {
+    if (cleanDest && !isNaoInformado(cleanDest)) {
+      destinatarioCorrigido = cleanDest
+      camposAjustados.push('destinatario')
+    } else if (!isNaoInformado(item.destNome)) {
+      destinatarioCorrigido = 'Não informado'
+      camposAjustados.push('destinatario')
+    }
+  }
+
+  // 4. Auditoria de Produto
+  if (isNaoInformado(item.produto)) {
+    if (/CRISTAL/i.test(fullText)) {
+      produtoCorrigido = 'ACUCAR CRISTAL VHP'
+      camposAjustados.push('produto')
+    } else if (/A[CÇ][UÚ]CAR|VHP/i.test(fullText)) {
+      produtoCorrigido = 'ACUCAR BRUTO VHP'
+      camposAjustados.push('produto')
+    } else if (/SOJA/i.test(fullText)) {
+      produtoCorrigido = 'SOJA EM GRAOS'
+      camposAjustados.push('produto')
+    } else if (/MILHO/i.test(fullText)) {
+      produtoCorrigido = 'MILHO EM GRAOS'
+      camposAjustados.push('produto')
+    } else if (/FARELO/i.test(fullText)) {
+      produtoCorrigido = 'FARELO DE SOJA'
+      camposAjustados.push('produto')
+    }
+  }
+
+  let status: LogisticsStatusTipo = 'NAO_CONSTA_NO_DOC'
+  let veredito = 'Dados Não Identificados no Documento'
+  let explicacao = 'O documento fiscal não possui menção expressa aos dados logísticos faltantes.'
+
+  if (camposAjustados.length > 0) {
+    status = 'AJUSTADO_IA'
+    const descCampos = camposAjustados.map(c => {
+      if (c === 'terminal') return `Terminal: ${terminalCorrigido}`
+      if (c === 'transbordo') return `Transbordo: ${transbordoCorrigido}`
+      if (c === 'destinatario') return `Destinatário: ${destinatarioCorrigido}`
+      if (c === 'produto') return `Produto: ${produtoCorrigido}`
+      return c
+    }).join(' | ')
+    veredito = `Dados Identificados com Sucesso: ${descCampos}`
+    explicacao = `Localizado a partir da análise dos dados adicionais e texto fiscal da DANFE (${camposAjustados.join(', ')}).`
+  }
+
+  return {
+    id: item.id,
+    numero: item.numero,
+    terminalCorrigido: isNaoInformado(terminalCorrigido) ? undefined : terminalCorrigido,
+    transbordoCorrigido: isNaoInformado(transbordoCorrigido) ? undefined : transbordoCorrigido,
+    destinatarioCorrigido,
+    retiradaCorrigida: isNaoInformado(retiradaCorrigida) ? undefined : retiradaCorrigida,
+    produtoCorrigido: isNaoInformado(produtoCorrigido) ? undefined : produtoCorrigido,
+    status,
+    veredito,
+    explicacao,
+    confianca: camposAjustados.length > 0 ? 'ALTA' : 'BAIXA',
+    modoUtilizado: 'HEURISTICA_LOCAL',
+    camposAjustados,
+  }
+}
+
+/**
+ * Chama o backend com IA Gemini 3.7 Flash para auditar e preencher dados logísticos não informados
+ */
+export async function auditarLogisticaComIA(items: LogisticsAuditInputItem[]): Promise<LogisticsAuditResponse> {
+  if (!items || items.length === 0) {
+    return {
+      totalAuditados: 0,
+      totalAjustados: 0,
+      totalSemDados: 0,
+      resultados: [],
+      provedor: 'HEURISTICA_INTELIGENTE',
+    }
+  }
+
+  try {
+    const response = await fetch('/api/gemini/audit-logistics', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ items }),
+    })
+
+    if (!response.ok) {
+      throw new Error(`Erro na chamada da API: ${response.status} ${response.statusText}`)
+    }
+
+    const data: LogisticsAuditResponse = await response.json()
+    return data
+  } catch (err) {
+    console.warn('[Logistics Auditor] Fallback heurístico inteligente:', err)
+    const localResults = items.map(auditarLogisticaHeuristicaLocal)
+    const totalAjustados = localResults.filter(r => r.camposAjustados.length > 0).length
+    return {
+      totalAuditados: items.length,
+      totalAjustados,
+      totalSemDados: items.length - totalAjustados,
+      resultados: localResults,
+      tokensUtilizadosEstimados: 0,
+      provedor: 'HEURISTICA_INTELIGENTE',
+    }
+  }
+}

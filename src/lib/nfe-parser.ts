@@ -1,0 +1,1231 @@
+import { matchTransbordoFromText } from './cadastros-logisticos-service'
+import { getExplicitGuarujaTerminalCode } from './terminal-utils'
+
+export interface CNPJVerificationResult {
+  chaveCnpj: string
+  chaveCnpjRaw: string
+  emitenteCnpjRaw: string
+  destinatarioCnpjRaw: string
+  matchesEmitente: boolean
+  matchesDestinatario: boolean
+  confrontoChaveXDest: "IGUAIS" | "DIVERGENTES" | "NÃO INFORMADO"
+  confrontoChaveXEmit: "IGUAIS" | "DIVERGENTES" | "NÃO INFORMADO"
+  isValid: boolean
+  statusLabel: string
+  details: string
+}
+
+export interface NFEData {
+  tipo: "NFe" | "NFSe" | "Desconhecido"
+  // Identificação
+  numero: string
+  serie: string
+  dataEmissao: string
+  horaEmissao: string
+  dataEntradaSaida: string
+  horaEntradaSaida: string
+  chaveAcesso: string
+  protocolo: string
+  naturezaOperacao: string
+  tipoOperacao: "0" | "1" // 0 = entrada, 1 = saída
+  folha: string
+  // Validação do CNPJ da Chave x Remetente/Destinatário
+  verificacaoCNPJ?: CNPJVerificationResult
+  // Campos extraídos das informações complementares
+  terminalEntrega: string
+  transbordo: string
+  retirada: string
+  tipoProduto: "SOJA" | "MILHO" | "ACUCAR" | "FARELO" | "OUTRO"
+  // Emitente
+  emitente: {
+    cnpj: string
+    nome: string
+    nomeFantasia: string
+    endereco: string
+    numero: string
+    bairro: string
+    cidade: string
+    uf: string
+    cep: string
+    telefone: string
+    inscricaoEstadual: string
+    inscricaoEstadualST: string
+  }
+  // Destinatário
+  destinatario: {
+    cpfCnpj: string
+    nome: string
+    endereco: string
+    numero: string
+    bairro: string
+    cidade: string
+    uf: string
+    cep: string
+    telefone: string
+    email: string
+    inscricaoEstadual: string
+  }
+  // Transportador
+  transportador: {
+    nome: string
+    cpfCnpj: string
+    endereco: string
+    cidade: string
+    uf: string
+    inscricaoEstadual: string
+    fretePorConta: string // 0=emitente, 1=destinatario, etc
+    codigoANTT: string
+    placaVeiculo: string
+    ufVeiculo: string
+    // Volumes
+    quantidade: number
+    especie: string
+    marca: string
+    numeracao: string
+    pesoLiquido: number
+    pesoBruto: number
+  }
+  // Produtos/Serviços
+  itens: Array<{
+    numero: string
+    codigo: string
+    descricao: string
+    ncm: string
+    cst: string
+    cfop: string
+    unidade: string
+    quantidade: number
+    valorUnitario: number
+    valorTotal: number
+    baseICMS: number
+    valorICMS: number
+    aliqICMS: number
+    aliqIPI: number
+    valorIPI: number
+  }>
+  // Cálculo do imposto
+  impostos: {
+    baseCalcICMS: number
+    valorICMS: number
+    baseCalcICMSST: number
+    valorICMSST: number
+    valorFrete: number
+    valorSeguro: number
+    desconto: number
+    outrasDesp: number
+    valorIPI: number
+    valorProdutos: number
+    valorTotal: number
+  }
+  // Fatura / Duplicatas
+  fatura: {
+    numero: string
+    valorOriginal: number
+    valorDesconto: number
+    valorLiquido: number
+  }
+  duplicatas: Array<{
+    numero: string
+    vencimento: string
+    valor: number
+  }>
+  // Informações adicionais
+  informacoesComplementares: string
+  informacoesFisco: string
+}
+
+function getTextContent(doc: Document, tagName: string, parent?: Element): string {
+  const context = parent || doc
+  const elements = context.getElementsByTagName(tagName)
+  if (elements.length > 0 && elements[0].textContent) {
+    return elements[0].textContent.trim()
+  }
+  return ""
+}
+
+function parseNumber(value: string): number {
+  if (!value) return 0
+  const clean = value.trim()
+  if (clean.includes(',') && clean.includes('.')) {
+    const num = parseFloat(clean.replace(/\./g, '').replace(',', '.'))
+    return isNaN(num) ? 0 : num
+  }
+  if (clean.includes(',')) {
+    const num = parseFloat(clean.replace(',', '.'))
+    return isNaN(num) ? 0 : num
+  }
+  const num = parseFloat(clean)
+  return isNaN(num) ? 0 : num
+}
+
+export function parseNFE(xmlString: string): NFEData {
+  const parser = new DOMParser()
+  const doc = parser.parseFromString(xmlString, "text/xml")
+
+  // Detectar tipo de documento
+  const isNFe = doc.getElementsByTagName("NFe").length > 0 || doc.getElementsByTagName("nfeProc").length > 0
+  const isNFSe =
+    doc.getElementsByTagName("CompNfse").length > 0 || doc.getElementsByTagName("Nfse").length > 0
+
+  const tipo = isNFe ? "NFe" : isNFSe ? "NFSe" : "Desconhecido"
+
+  if (isNFe) {
+    return parseNFeData(doc, tipo)
+  } else if (isNFSe) {
+    return parseNFSeData(doc, tipo)
+  }
+
+  return parseGenericData(doc, tipo)
+}
+
+function parseNFeData(doc: Document, tipo: "NFe" | "NFSe" | "Desconhecido"): NFEData {
+  // Identificação
+  const ide = doc.getElementsByTagName("ide")[0]
+  const emit = doc.getElementsByTagName("emit")[0]
+  const dest = doc.getElementsByTagName("dest")[0]
+  const total = doc.getElementsByTagName("total")[0]
+  const transp = doc.getElementsByTagName("transp")[0]
+  const cobr = doc.getElementsByTagName("cobr")[0]
+  const infAdic = doc.getElementsByTagName("infAdic")[0]
+  const protNFe = doc.getElementsByTagName("protNFe")[0]
+
+  // Parse itens
+  const dets = doc.getElementsByTagName("det")
+  const itens: NFEData["itens"] = []
+
+  for (let i = 0; i < dets.length; i++) {
+    const det = dets[i]
+    const prod = det.getElementsByTagName("prod")[0]
+    const imposto = det.getElementsByTagName("imposto")[0]
+    const icms = imposto?.getElementsByTagName("ICMS")[0]
+    const ipi = imposto?.getElementsByTagName("IPI")[0]
+    
+    // Encontrar o elemento ICMS específico (ICMS00, ICMS10, etc)
+    let icmsElement: Element | undefined
+    if (icms) {
+      const icmsTypes = ["ICMS00", "ICMS10", "ICMS20", "ICMS30", "ICMS40", "ICMS41", "ICMS50", "ICMS51", "ICMS60", "ICMS70", "ICMS90", "ICMSSN101", "ICMSSN102", "ICMSSN201", "ICMSSN202", "ICMSSN500", "ICMSSN900"]
+      for (const icmsType of icmsTypes) {
+        const found = icms.getElementsByTagName(icmsType)[0]
+        if (found) {
+          icmsElement = found
+          break
+        }
+      }
+    }
+
+    // Encontrar IPITrib
+    let ipiElement: Element | undefined
+    if (ipi) {
+      ipiElement = ipi.getElementsByTagName("IPITrib")[0]
+    }
+
+    if (prod) {
+      itens.push({
+        numero: det.getAttribute("nItem") || String(i + 1),
+        codigo: getTextContent(doc, "cProd", prod),
+        descricao: getTextContent(doc, "xProd", prod),
+        ncm: getTextContent(doc, "NCM", prod),
+        cst: icmsElement ? (getTextContent(doc, "CST", icmsElement) || getTextContent(doc, "CSOSN", icmsElement)) : "",
+        cfop: getTextContent(doc, "CFOP", prod),
+        unidade: getTextContent(doc, "uCom", prod),
+        quantidade: parseNumber(getTextContent(doc, "qCom", prod)),
+        valorUnitario: parseNumber(getTextContent(doc, "vUnCom", prod)),
+        valorTotal: parseNumber(getTextContent(doc, "vProd", prod)),
+        baseICMS: icmsElement ? parseNumber(getTextContent(doc, "vBC", icmsElement)) : 0,
+        valorICMS: icmsElement ? parseNumber(getTextContent(doc, "vICMS", icmsElement)) : 0,
+        aliqICMS: icmsElement ? parseNumber(getTextContent(doc, "pICMS", icmsElement)) : 0,
+        aliqIPI: ipiElement ? parseNumber(getTextContent(doc, "pIPI", ipiElement)) : 0,
+        valorIPI: ipiElement ? parseNumber(getTextContent(doc, "vIPI", ipiElement)) : 0,
+      })
+    }
+  }
+
+  // Endereco emitente
+  const enderEmit = emit?.getElementsByTagName("enderEmit")[0]
+  const enderDest = dest?.getElementsByTagName("enderDest")[0]
+
+  // Transportador
+  const transporta = transp?.getElementsByTagName("transporta")[0]
+  const veicTransp = transp?.getElementsByTagName("veicTransp")[0]
+  const vol = transp?.getElementsByTagName("vol")[0]
+
+  // Duplicatas
+  const dups = cobr?.getElementsByTagName("dup") || []
+  const duplicatas: NFEData["duplicatas"] = []
+  for (let i = 0; i < dups.length; i++) {
+    const dup = dups[i]
+    duplicatas.push({
+      numero: getTextContent(doc, "nDup", dup as Element),
+      vencimento: formatDate(getTextContent(doc, "dVenc", dup as Element)),
+      valor: parseNumber(getTextContent(doc, "vDup", dup as Element)),
+    })
+  }
+
+  // Data e hora
+const dhEmi = getTextContent(doc, "dhEmi", ide) || getTextContent(doc, "dEmi", ide)
+  const dhSaiEnt = getTextContent(doc, "dhSaiEnt", ide) || getTextContent(doc, "dSaiEnt", ide)
+  
+  // Extrair informações complementares para análise
+  const informacoesComplementares = infAdic
+    ? (
+        getTextContent(doc, "infCpl", infAdic as Element) + " " +
+        getTextContent(doc, "infAdFisco", infAdic as Element) + " " +
+        (infAdic.textContent || "")
+      ).trim()
+    : ""
+  
+  // Detectar tipo de produto baseado na descrição dos itens
+  const descricaoProdutos = itens.map(i => i.descricao).join(" ")
+  
+  const infNFeEl = doc.getElementsByTagName("infNFe")[0]
+  let chaveAcesso = protNFe ? getTextContent(doc, "chNFe", protNFe as Element) : ""
+  if (!chaveAcesso && infNFeEl) {
+    const idAttr = infNFeEl.getAttribute("Id") || infNFeEl.getAttribute("id") || ""
+    chaveAcesso = idAttr.replace(/^NFe/i, "").trim()
+  }
+  if (!chaveAcesso) {
+    const chNFeEl = doc.getElementsByTagName("chNFe")[0]
+    if (chNFeEl && chNFeEl.textContent) {
+      chaveAcesso = chNFeEl.textContent.trim()
+    }
+  }
+  if (!chaveAcesso) {
+    chaveAcesso = getTextContent(doc, "Id").replace(/^NFe/i, "").trim()
+  }
+  const emitCnpj = formatCNPJ(getTextContent(doc, "CNPJ", emit))
+  const destCnpj = formatCPFCNPJ(
+    getTextContent(doc, "CNPJ", dest) || getTextContent(doc, "CPF", dest)
+  )
+  const verificacaoCNPJ = verifyChaveCNPJ(chaveAcesso, emitCnpj, destCnpj)
+
+  return {
+  tipo,
+  numero: getTextContent(doc, "nNF", ide),
+  serie: getTextContent(doc, "serie", ide),
+  dataEmissao: formatDate(dhEmi),
+  horaEmissao: formatTime(dhEmi),
+  dataEntradaSaida: formatDate(dhSaiEnt),
+  horaEntradaSaida: formatTime(dhSaiEnt) || formatTime(getTextContent(doc, "hSaiEnt", ide)),
+  chaveAcesso,
+  verificacaoCNPJ,
+  protocolo: protNFe ? getTextContent(doc, "nProt", protNFe as Element) : "",
+  naturezaOperacao: getTextContent(doc, "natOp", ide),
+  tipoOperacao: (getTextContent(doc, "tpNF", ide) as "0" | "1") || "1",
+  folha: "1/1",
+  // Campos extraídos das informações complementares
+  terminalEntrega: extractTerminalEntrega(informacoesComplementares),
+  transbordo: extractTransbordo(informacoesComplementares, `${getTextContent(doc, "xMun", enderEmit)} ${getTextContent(doc, "xNome", emit)} ${getTextContent(doc, "xMun", enderDest)}`),
+  retirada: extractRetirada(informacoesComplementares),
+  tipoProduto: detectTipoProduto(descricaoProdutos, informacoesComplementares),
+  emitente: {
+      cnpj: emitCnpj,
+      nome: getTextContent(doc, "xNome", emit),
+      nomeFantasia: getTextContent(doc, "xFant", emit),
+      endereco: getTextContent(doc, "xLgr", enderEmit),
+      numero: getTextContent(doc, "nro", enderEmit),
+      bairro: getTextContent(doc, "xBairro", enderEmit),
+      cidade: getTextContent(doc, "xMun", enderEmit),
+      uf: getTextContent(doc, "UF", enderEmit),
+      cep: formatCEP(getTextContent(doc, "CEP", enderEmit)),
+      telefone: formatPhone(getTextContent(doc, "fone", enderEmit)),
+      inscricaoEstadual: getTextContent(doc, "IE", emit),
+      inscricaoEstadualST: getTextContent(doc, "IEST", emit),
+    },
+    destinatario: {
+      cpfCnpj: destCnpj,
+      nome: getTextContent(doc, "xNome", dest),
+      endereco: getTextContent(doc, "xLgr", enderDest),
+      numero: getTextContent(doc, "nro", enderDest),
+      bairro: getTextContent(doc, "xBairro", enderDest),
+      cidade: getTextContent(doc, "xMun", enderDest),
+      uf: getTextContent(doc, "UF", enderDest),
+      cep: formatCEP(getTextContent(doc, "CEP", enderDest)),
+      telefone: formatPhone(getTextContent(doc, "fone", enderDest)),
+      email: getTextContent(doc, "email", dest),
+      inscricaoEstadual: getTextContent(doc, "IE", dest),
+    },
+    transportador: {
+      nome: transporta ? getTextContent(doc, "xNome", transporta) : "",
+      cpfCnpj: transporta ? formatCPFCNPJ(getTextContent(doc, "CNPJ", transporta) || getTextContent(doc, "CPF", transporta)) : "",
+      endereco: transporta ? getTextContent(doc, "xEnder", transporta) : "",
+      cidade: transporta ? getTextContent(doc, "xMun", transporta) : "",
+      uf: transporta ? getTextContent(doc, "UF", transporta) : "",
+      inscricaoEstadual: transporta ? getTextContent(doc, "IE", transporta) : "",
+      fretePorConta: getTextContent(doc, "modFrete", transp),
+      codigoANTT: veicTransp ? getTextContent(doc, "RNTC", veicTransp) : "",
+      placaVeiculo: veicTransp ? getTextContent(doc, "placa", veicTransp) : "",
+      ufVeiculo: veicTransp ? getTextContent(doc, "UF", veicTransp) : "",
+      quantidade: vol ? parseNumber(getTextContent(doc, "qVol", vol as Element)) : 0,
+      especie: vol ? getTextContent(doc, "esp", vol as Element) : "",
+      marca: vol ? getTextContent(doc, "marca", vol as Element) : "",
+      numeracao: vol ? getTextContent(doc, "nVol", vol as Element) : "",
+      pesoLiquido: vol ? parseNumber(getTextContent(doc, "pesoL", vol as Element)) : 0,
+      pesoBruto: vol ? parseNumber(getTextContent(doc, "pesoB", vol as Element)) : 0,
+    },
+    itens,
+    impostos: {
+      baseCalcICMS: parseNumber(getTextContent(doc, "vBC", total)),
+      valorICMS: parseNumber(getTextContent(doc, "vICMS", total)),
+      baseCalcICMSST: parseNumber(getTextContent(doc, "vBCST", total)),
+      valorICMSST: parseNumber(getTextContent(doc, "vST", total)),
+      valorFrete: parseNumber(getTextContent(doc, "vFrete", total)),
+      valorSeguro: parseNumber(getTextContent(doc, "vSeg", total)),
+      desconto: parseNumber(getTextContent(doc, "vDesc", total)),
+      outrasDesp: parseNumber(getTextContent(doc, "vOutro", total)),
+      valorIPI: parseNumber(getTextContent(doc, "vIPI", total)),
+      valorProdutos: parseNumber(getTextContent(doc, "vProd", total)),
+      valorTotal: parseNumber(getTextContent(doc, "vNF", total)),
+    },
+    fatura: cobr ? {
+      numero: getTextContent(doc, "nFat", cobr.getElementsByTagName("fat")[0] as Element),
+      valorOriginal: parseNumber(getTextContent(doc, "vOrig", cobr.getElementsByTagName("fat")[0] as Element)),
+      valorDesconto: parseNumber(getTextContent(doc, "vDesc", cobr.getElementsByTagName("fat")[0] as Element)),
+      valorLiquido: parseNumber(getTextContent(doc, "vLiq", cobr.getElementsByTagName("fat")[0] as Element)),
+    } : {
+      numero: "",
+      valorOriginal: 0,
+      valorDesconto: 0,
+      valorLiquido: 0,
+    },
+    duplicatas,
+    informacoesComplementares: infAdic ? getTextContent(doc, "infCpl", infAdic as Element) : "",
+    informacoesFisco: infAdic ? getTextContent(doc, "infAdFisco", infAdic as Element) : "",
+  }
+}
+
+function parseNFSeData(doc: Document, tipo: "NFe" | "NFSe" | "Desconhecido"): NFEData {
+  const infNfse = doc.getElementsByTagName("InfNfse")[0]
+  const prestador = doc.getElementsByTagName("PrestadorServico")[0] || doc.getElementsByTagName("Prestador")[0]
+  const tomador = doc.getElementsByTagName("TomadorServico")[0] || doc.getElementsByTagName("Tomador")[0]
+  const servico = doc.getElementsByTagName("Servico")[0]
+  const valores = doc.getElementsByTagName("Valores")[0]
+
+  const enderecoPrestador = prestador?.getElementsByTagName("Endereco")[0]
+  const enderecoTomador = tomador?.getElementsByTagName("Endereco")[0]
+  const identificacaoTomador = tomador?.getElementsByTagName("IdentificacaoTomador")[0]
+
+  const valorServicos = parseNumber(getTextContent(doc, "ValorServicos", valores))
+  
+  return {
+    tipo,
+    numero: getTextContent(doc, "Numero", infNfse),
+    serie: getTextContent(doc, "Serie", infNfse) || "1",
+    dataEmissao: formatDate(getTextContent(doc, "DataEmissao", infNfse)),
+    horaEmissao: formatTime(getTextContent(doc, "DataEmissao", infNfse)),
+    dataEntradaSaida: "",
+    horaEntradaSaida: "",
+chaveAcesso: getTextContent(doc, "CodigoVerificacao", infNfse),
+  protocolo: "",
+  naturezaOperacao: "Prestacao de Servicos",
+  tipoOperacao: "1",
+  folha: "1/1",
+  terminalEntrega: "",
+  transbordo: "",
+  retirada: "",
+  tipoProduto: "OUTRO",
+  emitente: {
+      cnpj: formatCNPJ(getTextContent(doc, "Cnpj", prestador)),
+      nome: getTextContent(doc, "RazaoSocial", prestador),
+      nomeFantasia: getTextContent(doc, "NomeFantasia", prestador),
+      endereco: getTextContent(doc, "Endereco", enderecoPrestador),
+      numero: getTextContent(doc, "Numero", enderecoPrestador),
+      bairro: getTextContent(doc, "Bairro", enderecoPrestador),
+      cidade: getTextContent(doc, "Municipio", enderecoPrestador) || getTextContent(doc, "CodigoMunicipio", enderecoPrestador),
+      uf: getTextContent(doc, "Uf", enderecoPrestador),
+      cep: formatCEP(getTextContent(doc, "Cep", enderecoPrestador)),
+      telefone: formatPhone(getTextContent(doc, "Telefone", prestador)),
+      inscricaoEstadual: getTextContent(doc, "InscricaoMunicipal", prestador),
+      inscricaoEstadualST: "",
+    },
+    destinatario: {
+      cpfCnpj: formatCPFCNPJ(
+        getTextContent(doc, "Cnpj", identificacaoTomador) || getTextContent(doc, "Cpf", identificacaoTomador)
+      ),
+      nome: getTextContent(doc, "RazaoSocial", tomador),
+      endereco: getTextContent(doc, "Endereco", enderecoTomador),
+      numero: getTextContent(doc, "Numero", enderecoTomador),
+      bairro: getTextContent(doc, "Bairro", enderecoTomador),
+      cidade: getTextContent(doc, "Municipio", enderecoTomador) || getTextContent(doc, "CodigoMunicipio", enderecoTomador),
+      uf: getTextContent(doc, "Uf", enderecoTomador),
+      cep: formatCEP(getTextContent(doc, "Cep", enderecoTomador)),
+      telefone: formatPhone(getTextContent(doc, "Telefone", tomador)),
+      email: getTextContent(doc, "Email", tomador),
+      inscricaoEstadual: "",
+    },
+    transportador: {
+      nome: "",
+      cpfCnpj: "",
+      endereco: "",
+      cidade: "",
+      uf: "",
+      inscricaoEstadual: "",
+      fretePorConta: "",
+      codigoANTT: "",
+      placaVeiculo: "",
+      ufVeiculo: "",
+      quantidade: 0,
+      especie: "",
+      marca: "",
+      numeracao: "",
+      pesoLiquido: 0,
+      pesoBruto: 0,
+    },
+    itens: [
+      {
+        numero: "1",
+        codigo: getTextContent(doc, "ItemListaServico", servico),
+        descricao: getTextContent(doc, "Discriminacao", servico),
+        ncm: "",
+        cst: "",
+        cfop: "",
+        unidade: "SV",
+        quantidade: 1,
+        valorUnitario: valorServicos,
+        valorTotal: valorServicos,
+        baseICMS: 0,
+        valorICMS: 0,
+        aliqICMS: 0,
+        aliqIPI: 0,
+        valorIPI: 0,
+      },
+    ],
+    impostos: {
+      baseCalcICMS: 0,
+      valorICMS: 0,
+      baseCalcICMSST: 0,
+      valorICMSST: 0,
+      valorFrete: 0,
+      valorSeguro: 0,
+      desconto: parseNumber(getTextContent(doc, "DescontoIncondicionado", valores)),
+      outrasDesp: 0,
+      valorIPI: 0,
+      valorProdutos: valorServicos,
+      valorTotal: parseNumber(getTextContent(doc, "ValorLiquidoNfse", valores)) || valorServicos,
+    },
+    fatura: {
+      numero: "",
+      valorOriginal: 0,
+      valorDesconto: 0,
+      valorLiquido: 0,
+    },
+    duplicatas: [],
+    informacoesComplementares: getTextContent(doc, "Discriminacao", servico),
+    informacoesFisco: "",
+  }
+}
+
+function parseGenericData(doc: Document, tipo: "NFe" | "NFSe" | "Desconhecido"): NFEData {
+  return {
+    tipo,
+    numero: "",
+    serie: "",
+    dataEmissao: new Date().toLocaleDateString("pt-BR"),
+    horaEmissao: "",
+    dataEntradaSaida: "",
+    horaEntradaSaida: "",
+    chaveAcesso: "",
+    protocolo: "",
+    naturezaOperacao: "",
+tipoOperacao: "1",
+  folha: "1/1",
+  terminalEntrega: "",
+  transbordo: "",
+  retirada: "",
+  tipoProduto: "OUTRO",
+  emitente: {
+  cnpj: "",
+  nome: "",
+      nomeFantasia: "",
+      endereco: "",
+      numero: "",
+      bairro: "",
+      cidade: "",
+      uf: "",
+      cep: "",
+      telefone: "",
+      inscricaoEstadual: "",
+      inscricaoEstadualST: "",
+    },
+    destinatario: {
+      cpfCnpj: "",
+      nome: "",
+      endereco: "",
+      numero: "",
+      bairro: "",
+      cidade: "",
+      uf: "",
+      cep: "",
+      telefone: "",
+      email: "",
+      inscricaoEstadual: "",
+    },
+    transportador: {
+      nome: "",
+      cpfCnpj: "",
+      endereco: "",
+      cidade: "",
+      uf: "",
+      inscricaoEstadual: "",
+      fretePorConta: "",
+      codigoANTT: "",
+      placaVeiculo: "",
+      ufVeiculo: "",
+      quantidade: 0,
+      especie: "",
+      marca: "",
+      numeracao: "",
+      pesoLiquido: 0,
+      pesoBruto: 0,
+    },
+    itens: [],
+    impostos: {
+      baseCalcICMS: 0,
+      valorICMS: 0,
+      baseCalcICMSST: 0,
+      valorICMSST: 0,
+      valorFrete: 0,
+      valorSeguro: 0,
+      desconto: 0,
+      outrasDesp: 0,
+      valorIPI: 0,
+      valorProdutos: 0,
+      valorTotal: 0,
+    },
+    fatura: {
+      numero: "",
+      valorOriginal: 0,
+      valorDesconto: 0,
+      valorLiquido: 0,
+    },
+    duplicatas: [],
+    informacoesComplementares: "",
+    informacoesFisco: "",
+  }
+}
+
+// Formatters
+function formatDate(dateStr: string): string {
+  if (!dateStr) return ""
+  try {
+    const date = new Date(dateStr)
+    return date.toLocaleDateString("pt-BR")
+  } catch {
+    return dateStr
+  }
+}
+
+function formatTime(dateStr: string): string {
+  if (!dateStr) return ""
+  try {
+    const date = new Date(dateStr)
+    return date.toLocaleTimeString("pt-BR")
+  } catch {
+    return ""
+  }
+}
+
+export function formatCNPJ(cnpj: string): string {
+  if (!cnpj) return ""
+  const cleaned = cnpj.replace(/\D/g, "")
+  if (cleaned.length !== 14) return cnpj
+  return cleaned.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/, "$1.$2.$3/$4-$5")
+}
+
+function formatCPFCNPJ(value: string): string {
+  if (!value) return ""
+  const cleaned = value.replace(/\D/g, "")
+  if (cleaned.length === 11) {
+    return cleaned.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4")
+  }
+  if (cleaned.length === 14) {
+    return formatCNPJ(value)
+  }
+  return value
+}
+
+function formatCEP(cep: string): string {
+  if (!cep) return ""
+  const cleaned = cep.replace(/\D/g, "")
+  if (cleaned.length !== 8) return cep
+  return cleaned.replace(/(\d{5})(\d{3})/, "$1-$2")
+}
+
+function formatPhone(phone: string): string {
+  if (!phone) return ""
+  const cleaned = phone.replace(/\D/g, "")
+  if (cleaned.length === 10) {
+  return cleaned.replace(/(\d{2})(\d{4})(\d{4})/, "($1) $2-$3")
+  }
+  if (cleaned.length === 11) {
+  return cleaned.replace(/(\d{2})(\d{5})(\d{4})/, "($1) $2-$3")
+  }
+  return phone
+}
+
+export function verifyChaveCNPJ(
+  chaveAcesso: string,
+  cnpjEmitente: string,
+  cnpjDestinatario: string
+): CNPJVerificationResult {
+  const chaveDigits = (chaveAcesso || "").replace(/\D/g, "")
+  let emitDigits = (cnpjEmitente || "").replace(/\D/g, "")
+  let destDigits = (cnpjDestinatario || "").replace(/\D/g, "")
+
+  let chaveCnpjRaw = ""
+  let chaveCnpj = ""
+
+  if (chaveDigits.length === 44) {
+    chaveCnpjRaw = chaveDigits.slice(6, 20)
+    chaveCnpj = formatCNPJ(chaveCnpjRaw)
+  }
+
+  // Se o destDigits for uma Inscrição Estadual (ex: 12 dígitos como 557061801119 ou 8-10 dígitos)
+  // e não um CNPJ (14 dígitos) ou CPF (11 dígitos)
+  const isDestIE = destDigits.length === 12 || (destDigits.length >= 8 && destDigits.length <= 10) || (destDigits.length > 11 && destDigits.length < 14)
+  const isEmitIE = emitDigits.length === 12 || (emitDigits.length >= 8 && emitDigits.length <= 10) || (emitDigits.length > 11 && emitDigits.length < 14)
+
+  // Se o emitDigits for uma Inscrição Estadual e não tivermos o CNPJ do emitente
+  if (isEmitIE && chaveCnpjRaw) {
+    emitDigits = chaveCnpjRaw
+  }
+
+  const matchesEmitente = !!(
+    chaveCnpjRaw &&
+    emitDigits &&
+    (chaveCnpjRaw === emitDigits ||
+      emitDigits.includes(chaveCnpjRaw) ||
+      (chaveCnpjRaw.length === 14 && emitDigits.length === 14 && chaveCnpjRaw.slice(0, 8) === emitDigits.slice(0, 8)))
+  )
+  const matchesDestinatario = !!(
+    chaveCnpjRaw &&
+    destDigits &&
+    (chaveCnpjRaw === destDigits ||
+      destDigits.includes(chaveCnpjRaw) ||
+      (chaveCnpjRaw.length === 14 && destDigits.length === 14 && chaveCnpjRaw.slice(0, 8) === destDigits.slice(0, 8)))
+  )
+
+  const confrontoChaveXDest: "IGUAIS" | "DIVERGENTES" | "NÃO INFORMADO" =
+    !chaveCnpjRaw || !destDigits
+      ? "NÃO INFORMADO"
+      : matchesDestinatario
+      ? "IGUAIS"
+      : "DIVERGENTES"
+
+  const confrontoChaveXEmit: "IGUAIS" | "DIVERGENTES" | "NÃO INFORMADO" =
+    !chaveCnpjRaw || !emitDigits
+      ? "NÃO INFORMADO"
+      : matchesEmitente
+      ? "IGUAIS"
+      : "DIVERGENTES"
+
+  // CRÍTICO: isValid na auditoria reflete estritamente se a Chave confere com o Destinatário esperado
+  const isValid = matchesDestinatario
+
+  let statusLabel = ""
+  let details = ""
+
+  const formattedEmit = formatCNPJ(emitDigits) || "Não Informado"
+  const formattedDest = formatCPFCNPJ(destDigits) || "Não Informado"
+
+  if (!chaveCnpjRaw) {
+    statusLabel = "Chave sem 44 dígitos"
+    details = "Chave de Acesso não possui os 44 dígitos padrões para extração do CNPJ."
+  } else if (!destDigits) {
+    statusLabel = "Destinatário Sem CNPJ"
+    details = `CNPJ da Chave (${chaveCnpj}) extraído. Destinatário sem CNPJ/CPF informado.`
+  } else if (matchesDestinatario) {
+    statusLabel = "IGUAIS (Chave = Destinatário)"
+    if (chaveCnpjRaw !== destDigits && chaveCnpjRaw.slice(0, 8) === destDigits.slice(0, 8)) {
+      details = `O CNPJ na Chave (${chaveCnpj}) confere com a mesma empresa/grupo do Destinatário (${formattedDest} - Matriz/Filial).`
+    } else {
+      details = `O CNPJ na Chave (${chaveCnpj}) é IGUAL ao CNPJ do Destinatário (${formattedDest}).`
+    }
+  } else {
+    // Quando o CNPJ da Chave NÃO bate com o Destinatário: É DIVERGENTE!
+    statusLabel = "DIVERGENTE (Chave ≠ Destinatário)"
+    if (matchesEmitente) {
+      details = `ATENÇÃO CRÍTICA: O CNPJ contido na Chave de Acesso (${chaveCnpj}) pertence ao EMITENTE (${formattedEmit}) e é DIVERGENTE do Destinatário (${formattedDest}).`
+    } else {
+      details = `ATENÇÃO CRÍTICA: O CNPJ contido na Chave (${chaveCnpj}) é DIVERGENTE tanto do Destinatário (${formattedDest}) quanto do Emitente (${formattedEmit}).`
+    }
+  }
+
+  return {
+    chaveCnpj,
+    chaveCnpjRaw,
+    emitenteCnpjRaw: emitDigits,
+    destinatarioCnpjRaw: destDigits,
+    matchesEmitente,
+    matchesDestinatario,
+    confrontoChaveXDest,
+    confrontoChaveXEmit,
+    isValid,
+    statusLabel,
+    details,
+  }
+}
+
+// Funções para extrair informações das informações complementares
+function extractTerminalEntrega(infComplementares: string): string {
+  if (!infComplementares) return ""
+
+  const uppercase = infComplementares.toUpperCase()
+  const explicitTerminalCode = getExplicitGuarujaTerminalCode(infComplementares)
+  if (explicitTerminalCode === 'TEAG') return 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
+  if (explicitTerminalCode === 'TEG') return 'TEG - TERMINAL EXPORTADOR DO GUARUJA'
+
+  // 1. Verificação por códigos/locais conhecidos em notas de exportação/agronegócio
+  // TEAG - TERMINAL DE ACUCAR DO GUARUJA (Prioridade Máxima)
+  if (
+    /\bTEAG\b/i.test(infComplementares) ||
+    uppercase.includes('04.721.589/0001-78') ||
+    infComplementares.includes('04721589000178') ||
+    infComplementares.includes('335127598119') ||
+    infComplementares.includes('335.127.598.119') ||
+    /TERMINAL.*EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR/i.test(infComplementares) ||
+    /TERMINAL.*A[CÇ][UÚ]CAR.*GUARUJ[AÁ]/i.test(infComplementares) ||
+    /TER.*EXP.*ACU[CÇ].*GUARUJ[AÁ]/i.test(infComplementares) ||
+    /EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR.*GUARUJ[AÁ]/i.test(infComplementares) ||
+    /BENTO\s*PEDRO\s*DA\s*COSTA/i.test(infComplementares) ||
+    /BENTOPEDRO\s*DA\s*COSTA/i.test(infComplementares) ||
+    ((uppercase.includes('GUARUJA') || uppercase.includes('GUARUJÁ')) && (uppercase.includes('ACUCAR') || uppercase.includes('AÇÚCAR')))
+  ) {
+    return 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
+  }
+
+  // TES - TERMINAL EXPORTADOR DE SANTOS
+  if (
+    /\bTES\b/i.test(infComplementares) ||
+    uppercase.includes('TERMINAL EXPORTADOR DE SANTOS') ||
+    uppercase.includes('TES TERMINAL') ||
+    uppercase.includes('18.845.076/0001-83') ||
+    infComplementares.includes('18845076000183')
+  ) {
+    return 'TES - TERMINAL EXPORTADOR DE SANTOS'
+  }
+
+  // Extração direta do bloco "INFORMAÇÕES DO LOCAL DE ENTREGA" da DANFE ou tag <entrega>
+  const entregaSectionMatch = infComplementares.match(/(?:INFORMA[ÇC][ÕO]ES\s+DO\s+LOCAL\s+DE\s+ENTREGA|LOCAL\s+DE\s+ENTREGA|<entrega>)([\s\S]{1,600}?)(?:C[ÁA]LCULO\s+DO\s+IMPOSTO|DADOS\s+DOS\s+PRODUTOS|TRANSPORTADOR|<\/entrega>|$)/i)
+  if (entregaSectionMatch && entregaSectionMatch[1]) {
+    const sec = entregaSectionMatch[1]
+    const secUpper = sec.toUpperCase()
+    if (
+      /\bTEAG\b/i.test(sec) ||
+      secUpper.includes('04.721.589/0001-78') ||
+      sec.includes('04721589000178') ||
+      sec.includes('335127598119') ||
+      sec.includes('335.127.598.119') ||
+      /TERMINAL.*EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR/i.test(sec) ||
+      /TERMINAL.*A[CÇ][UÚ]CAR/i.test(sec) ||
+      /ACUCAR.*GUARUJ/i.test(sec) ||
+      /BENTO\s*PEDRO/i.test(sec) ||
+      ((secUpper.includes('GUARUJA') || secUpper.includes('GUARUJÁ')) && (secUpper.includes('ACUCAR') || secUpper.includes('AÇÚCAR')))
+    ) {
+      return 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
+    }
+    if (/\bTES\b/i.test(sec) || secUpper.includes('TERMINAL EXPORTADOR DE SANTOS') || secUpper.includes('TES TERMINAL') || sec.includes('18.845.076/0001-83') || sec.includes('18845076000183')) {
+      return 'TES - TERMINAL EXPORTADOR DE SANTOS'
+    }
+    if (/\bTEG\b/i.test(sec) || secUpper.includes('TERMINAL EXPORTADOR DO GUARUJA') || secUpper.includes('TEG')) {
+      return 'TEG - TERMINAL EXPORTADOR DO GUARUJA'
+    }
+    if (/\bTGG\b/i.test(sec) || secUpper.includes('TERMINAL DE GRA') || secUpper.includes('TGG')) {
+      return 'TGG - TERMINAL DE GRAIS DO GUARUJA'
+    }
+    if (/\bCLI\b/i.test(sec) || secUpper.includes('CORREDOR LOGISTICO')) {
+      return 'CLI - CORREDOR LOGISTICO INTEGRADO'
+    }
+  }
+
+  // Extração explícita de "ENTREGA: ..." das Informações Complementares
+  const entregaInfCplMatches = infComplementares.match(/(?:LOCAL\s+DE\s+ENTREGA|ENTREGA)\s*[:=-]\s*([^\n\r,;]{3,120})/gi)
+  if (entregaInfCplMatches) {
+    for (const matchStr of entregaInfCplMatches) {
+      const rawEntrega = matchStr.toUpperCase()
+      if (/\bTEAG\b|TERMINAL.*A[CÇ][UÚ]CAR|ACUCAR.*GUARUJ|04\.?721\.?589\/?0001-?78|BENTO\s*PEDRO/i.test(rawEntrega)) {
+        return 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
+      }
+      if (/\bTES\b|TERMINAL.*EXPORTADOR.*SANTOS/i.test(rawEntrega)) {
+        return 'TES - TERMINAL EXPORTADOR DE SANTOS'
+      }
+    }
+  }
+
+  if (/\bTEG\b/i.test(infComplementares) || uppercase.includes('TERMINAL EXPORTADOR DO GUARUJA') || uppercase.includes('TERM EXP GUARUJA') || uppercase.includes('GUARUJA LTDA GUARUJA')) {
+    return 'TEG - TERMINAL EXPORTADOR DO GUARUJA'
+  }
+  if (/\bTGG\b/i.test(infComplementares) || uppercase.includes('TERMINAL DE GRAIS DO GUARUJA') || uppercase.includes('TERMINAL DE GRAOS DO GUARUJA')) {
+    return 'TGG - TERMINAL DE GRAIS DO GUARUJA'
+  }
+  if (/\bTAC\b/i.test(infComplementares) || uppercase.includes('TERMINAL DE ARMAZENS')) {
+    return 'TAC - TERMINAL DE ARMAZENS'
+  }
+  if (/\bCLI\b/i.test(infComplementares) || uppercase.includes('CORREDOR LOGISTICO INTEGRADO')) {
+    return 'CLI - CORREDOR LOGISTICO INTEGRADO'
+  }
+  if (uppercase.includes('SANTOS BRASIL')) return 'SANTOS BRASIL'
+  if (uppercase.includes('DP WORLD')) return 'DP WORLD SANTOS'
+  if (uppercase.includes('ECOPORTO')) return 'ECOPORTO SANTOS'
+  if (uppercase.includes('BTP') || uppercase.includes('BRASIL TERMINAL PORTUARIO')) return 'BTP - BRASIL TERMINAL PORTUARIO'
+  if (uppercase.includes('TIPLAM')) return 'TIPLAM - TERMINAL INTEGRADO'
+
+  // 2. Trazer até 15 primeiras palavras depois de ALFANDEGADO, ALFADEGADO, RECINTO ou ENTREGA (não usar "TERMINAL" isolado para evitar transbordos)
+  const regex = /(?:RECINTO\s+ALFANDEGADO|RECINTO\s+ALFADEGADO|ALFANDEGADO|ALFADEGADO|TERMINAL\s+DE\s+ENTREGA|TERMINAL\s+ENTREGA|LOCAL\s+DE\s+ENTREGA|LOCAL\s+DE\s+DESCARGA|DESCARGA\s+NO\s+RECINTO|TERMINAL\s+EXPORTADOR|ENTREGA\s+EM|ENTREGA)\s*[:=-]?\s*([\s\S]{1,500})/i
+
+  const match = infComplementares.match(regex)
+  if (match && match[1]) {
+    let chunk = match[1].trim()
+    chunk = chunk.replace(/^(?:EM|DE|NO|NA|SERA|SERÁ|RECINTO|ALFANDEGADO|ALFADEGADO)\s*[:=-]?\s*/i, "")
+    const stopKeywords = [
+      "TRANSBORDO", "RETIRADA", "PLACA", "MOTORISTA", "CONTRATO",
+      "DESTINO", "CNPJ", "CPF", "OBS", "VALOR", "PESO", "QTD", "QUANTIDADE",
+      "TICKET", "NAVIO", "SAFRA", "PEDIDO", "NOTA FISCAL", "CHAVE", "DATA", "CEP", "IE"
+    ]
+    for (const kw of stopKeywords) {
+      const idx = chunk.toUpperCase().indexOf(kw)
+      if (idx > 0) {
+        chunk = chunk.substring(0, idx).trim()
+      }
+    }
+    const words = chunk.split(/\s+/).filter(Boolean).slice(0, 15)
+    let val = words.join(' ').replace(/[:=\-.,;]+$/, '').trim()
+    val = val.replace(/^(?:NOME\s*\/\s*RAZ[ÃA]O\s*SOCIAL|ME\s*\/\s*RAZ[ÃA]O\s*SOCIAL|RAZ[ÃA]O\s*SOCIAL|NOME)\s*[:=-]?\s*/i, '').trim()
+
+    // Se tiver relação com TEAG ou açúcar no Guarujá
+    if (/TERMINAL.*EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR|ACUCAR.*GUARUJ|04\.?721\.?589\/?0001-?78|BENTO\s*PEDRO/i.test(val)) {
+      return 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
+    }
+
+    // Se o valor capturado for um transbordo conhecido (ex: UBERABA, TIUB, FERNANDOPOLIS, ATT ARMAZENAGEM), NÃO é o terminal de entrega!
+    const valUpper = val.toUpperCase()
+    const isTransbordoHub = /UBERABA|TIUB|FERNANDOPOLIS|FERNANDÓPOLIS|ATT\s*ARMAZENAGEM|RONDONOPOLIS|RIO VERDE|ARAGUARI|ITURAMA|PRADOPOLIS|PEDERNEIRAS|SAO SIMAO|UBERLANDIA|INOCENCIA/i.test(valUpper)
+    if (!isTransbordoHub && val.length > 2 && !/^\d+$/.test(val)) {
+      return val
+    }
+  }
+
+  if (uppercase.includes('GUARUJA') || uppercase.includes('GUARUJÁ')) {
+    if (uppercase.includes('ACUCAR') || uppercase.includes('AÇÚCAR')) {
+      return 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
+    }
+    return 'TEG - TERMINAL EXPORTADOR DO GUARUJA'
+  }
+  if (uppercase.includes('SANTOS')) return 'TERMINAL SANTOS'
+  return ""
+}
+
+function getKnownTransbordo(str: string): string | null {
+  if (!str) return null
+  const catalogMatch = matchTransbordoFromText(str)
+  if (catalogMatch) return catalogMatch
+
+  const upper = str.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+
+  if (
+    upper.includes('FERNANDOPOLIS') ||
+    upper.includes('FERNANDOPOLIS-SP') ||
+    upper.includes('FERNANDOPOLIS - SP') ||
+    upper.includes('ATT ARMAZENAGEM') ||
+    upper.includes('72.451.917/0016-08') ||
+    upper.includes('72451917001608')
+  ) {
+    return 'FERNANDOPOLIS'
+  }
+  if (upper.includes('NOVA AGRI') || upper.includes('NOVAAGRI') || upper.includes('NOVA-AGRI')) {
+    if (upper.includes('ALTO TAQUARI')) return 'NOVA AGRI - ALTO TAQUARI'
+    return 'NOVA AGRI'
+  }
+  if (upper.includes('PRADOPOLIS') || upper.includes('PRADOPOLIS-SP') || upper.includes('PRADOPOLIS - SP')) return 'PRADOPOLIS'
+  if (upper.includes('ALTO TAQUARI')) return 'ALTO TAQUARI'
+  if (upper.includes('ALTO ARAGUAIA') || (upper.includes('ARAGUAIA') && !upper.includes('ARAGUARI'))) return 'ALTO ARAGUAIA'
+  if (upper.includes('RONDONOPOLIS')) {
+    return (upper.includes('RUMO') || upper.includes('MALHA') || upper.includes('TRANSBORDO')) ? 'RONDONOPOLIS (RUMO)' : 'RONDONOPOLIS'
+  }
+  if (upper.includes('RIO VERDE')) return 'RIO VERDE'
+  if (upper.includes('DOM AQUINO')) return 'DOM AQUINO'
+  if (upper.includes('ITURAMA')) return 'ITURAMA'
+  if (upper.includes('ITIQUIRA')) return 'ITIQUIRA'
+  if (upper.includes('UBERLANDIA')) return 'UBERLANDIA'
+  if (upper.includes('SAO SIMAO')) return 'SAO SIMAO'
+  if (upper.includes('CHAPADAO DO SUL')) return 'CHAPADAO DO SUL'
+  if (upper.includes('INOCENCIA')) return 'INOCENCIA'
+  if (upper.includes('RIO PRETO') || upper.includes('SAO JOSE DO RIO PRETO')) return 'RIO PRETO'
+  if (upper.includes('GUARA')) return 'GUARA'
+  if (upper.includes('PEDERNEIRAS')) return 'PEDERNEIRAS (RUMO)'
+  if (upper.includes('ARAGUARI')) return 'ARAGUARI (VLI)'
+  if (upper.includes('UBERABA') || upper.includes('TIUB')) return 'UBERABA'
+  if (upper.includes('COMPANHIA AUXILIAR') || upper.includes('CIA AUXILIAR')) return 'COMPANHIA AUXILIAR DE ARMAZENS GERAIS'
+
+  return null
+}
+
+function extractTransbordo(infComplementares: string, context?: string): string {
+  if (!infComplementares && !context) return ""
+
+  const fullText = `${infComplementares || ''} ${context || ''}`
+  const uppercase = fullText.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+
+  // 1. Prioridade máxima: validar se locais de transbordo cadastrados (Pradópolis, Pederneiras, etc.) constam no documento
+  if (/PRADOPOLIS|PRADÓPOLIS|SAO\s*MARTINHO|SÃO\s*MARTINHO/i.test(uppercase)) {
+    return 'PRADOPOLIS'
+  }
+  if (/PEDERNEIRAS/i.test(uppercase)) {
+    return 'PEDERNEIRAS (RUMO)'
+  }
+
+  // 2. Procurar por trechos específicos perto das palavras-chave indicadas (NUNCA incluir RECINTO ALFANDEGADO ou LOCAL DE ENTREGA)
+  const transbordoKeywordsRegex = /(?:TRANSBORDO|CIDADE DE TRANSBORDO|LOCAL DE TRANSBORDO|SOFRERA\s+TRANSBORDO|MERCADORIA\s+SOFRERA\s+TRANSBORDO|TRANSBORDO\s+NA|TRANSBORDO\s+EM|TRANSBORDO\s+DE|TRANSBORDO\s+NO|CIDADE\s*:)\s*[:=-]?\s*([\s\S]{1,300})/gi
+
+  let match: RegExpExecArray | null
+  while ((match = transbordoKeywordsRegex.exec(infComplementares)) !== null) {
+    const chunk = match[1]
+    const known = getKnownTransbordo(chunk)
+    if (known) return known
+  }
+
+  // 3. Se não encontrou no chunk das palavras-chave, verificar em infComplementares inteira
+  const knownInInf = getKnownTransbordo(infComplementares)
+  if (knownInInf) return knownInInf
+
+  // 4. Se houver menção explícita após palavras-chave sem local pré-mapeado, extrair texto limpo
+  const explicitMatch = infComplementares.match(/(?:SOFRERA\s+TRANSBORDO|MERCADORIA\s+SOFRERA\s+TRANSBORDO|LOCAL\s+DE\s+TRANSBORDO|LOCAL\s+TRANSBORDO|TRANSBORDO\s+NA|TRANSBORDO\s+EM|TRANSBORDO\s+DE|TRANSBORDO\s+NO|TRANSBORDO)\s*[:=-]?\s*([\s\S]{1,300})/i)
+
+  if (explicitMatch && explicitMatch[1]) {
+    let chunk = explicitMatch[1].trim()
+    chunk = chunk.replace(/^(?:EM|DE|NA|NO|SERA|SERÁ|MERCADORIA|CIDADE)\s*[:=-]?\s*/i, '')
+
+    const stopKeywords = [
+      "TERMINAL", "ENTREGA", "RETIRADA", "PLACA", "MOTORISTA", "CONTRATO",
+      "DESTINO", "CNPJ", "CPF", "OBS", "VALOR", "PESO", "QTD", "QUANTIDADE",
+      "TICKET", "NAVIO", "SAFRA", "PEDIDO", "NOTA FISCAL", "CHAVE", "DATA", "CEP", "IE", "RECINTO", "EMITENTE", "DESTINATARIO"
+    ]
+    for (const kw of stopKeywords) {
+      const idx = chunk.toUpperCase().indexOf(kw)
+      if (idx > 0) {
+        chunk = chunk.substring(0, idx).trim()
+      }
+    }
+
+    const words = chunk.split(/\s+/).filter(Boolean).slice(0, 10)
+    let val = words.join(' ').replace(/[:=\-.,;]+$/, '').trim()
+    const valUpper = val.toUpperCase()
+    const isPortTerminal = /\bTEAG\b|\bTEG\b|\bTES\b|\bTGG\b|\bCLI\b|\bSANTOS\b|\bGUARUJ[AÁ]\b|\bTIPLAM\b|TERMINAL.*EXPORTA[CÇ]|RECINTO/i.test(valUpper)
+    if (!isPortTerminal && val.length > 2 && !/^\d+$/.test(val) && !['NÃO', 'NAO', 'DE', 'EM', 'SP', 'MT', 'MS', 'GO', 'MG', 'PR'].includes(valUpper)) {
+      if (uppercase.includes('RUMO') || uppercase.includes('MALHA NORTE')) {
+        return val.toUpperCase().includes('RUMO') ? val : `${val} (RUMO)`
+      }
+      if (uppercase.includes('VLI')) {
+        return val.toUpperCase().includes('VLI') ? val : `${val} (VLI)`
+      }
+      return val
+    }
+  }
+
+  // 5. Fallback final: verificar se qualquer local conhecido de transbordo aparece no texto todo
+  const knownGlobal = getKnownTransbordo(fullText)
+  if (knownGlobal) return knownGlobal
+
+  // Se o emitente for São Martinho (usina em Pradópolis) e nenhum outro transbordo foi indicado
+  if (/SAO\s*MARTINHO|SÃO\s*MARTINHO/i.test(uppercase)) {
+    return 'PRADOPOLIS'
+  }
+
+  return ""
+}
+
+function extractRetirada(infComplementares: string): string {
+  if (!infComplementares) return ""
+
+  const text = infComplementares.replace(/\s+/g, " ")
+
+  const regex = /(?:LOCAL\s+DE\s+RETIRADA|RETIRADA\s+EM|RETIRADA)\s*[:=-]?\s*([^\n;,]+)/i
+
+  const match = text.match(regex)
+  let val = ""
+
+  if (match && match[1]) {
+    val = match[1].trim()
+    val = val.replace(/^(?:EM|DE)\s+[:=-]?\s*/i, "")
+
+    const stopKeywords = [
+      "TRANSBORDO", "TERMINAL", "ENTREGA", "PLACA", "MOTORISTA", "CONTRATO",
+      "DESTINO", "CNPJ", "CPF", "OBS", "VALOR", "PESO", "QTD", "QUANTIDADE",
+      "TICKET", "NAVIO", "SAFRA", "PEDIDO", "NOTA FISCAL", "CHAVE", "DATA"
+    ]
+
+    for (const kw of stopKeywords) {
+      const idx = val.toUpperCase().indexOf(kw)
+      if (idx > 0) {
+        val = val.substring(0, idx).trim()
+      }
+    }
+
+    val = val.replace(/[:=\-.,;]+$/, "").trim()
+  }
+
+  if (!val || /^\d+$/.test(val)) {
+    const fallbackMatch = text.match(/(SAO\s+SIMAO|SÃO\s+SIMÃO|JATAI|JATAÍ|RIO\s+VERDE|QUERENCIA|SORRISO)/i)
+    if (fallbackMatch) {
+      return fallbackMatch[1].trim()
+    }
+    return ""
+  }
+
+  return val
+}
+
+export function detectTipoProduto(descricaoProduto: string, infComplementares: string): "SOJA" | "MILHO" | "ACUCAR" | "FARELO" | "OUTRO" {
+  const texto = (descricaoProduto + " " + infComplementares).toUpperCase()
+  
+  if (texto.includes("FARELO") && texto.includes("SOJA")) return "FARELO"
+  if (texto.includes("SOJA")) return "SOJA"
+  if (texto.includes("MILHO")) return "MILHO"
+  if (texto.includes("ACUCAR") || texto.includes("AÇUCAR") || texto.includes("AÇÚCAR")) return "ACUCAR"
+  
+  return "OUTRO"
+}
+
+/**
+ * Identifica e padroniza a mercadoria/produto (SOJA, MILHO, AÇÚCAR, FARELO DE SOJA, etc.)
+ * a partir de dados da nota fiscal, XML, PDF ou coluna mercadoria da planilha Excel.
+ */
+export function extractMercadoria(
+  nota?: any,
+  rawExcelMercadoria?: string,
+  rawText?: string
+): string {
+  // 1. Se fornecido via planilha Excel (coluna Mercadoria ou Produto)
+  const excelStr = String(rawExcelMercadoria || '').trim()
+  if (excelStr && excelStr !== '-' && excelStr !== 'N/A' && excelStr !== 'N/I' && excelStr !== 'null') {
+    const excelUpper = excelStr.toUpperCase()
+    if (excelUpper.includes('FARELO') && excelUpper.includes('SOJA')) return 'FARELO DE SOJA'
+    if (excelUpper.includes('SOJA')) return 'SOJA'
+    if (excelUpper.includes('MILHO')) return 'MILHO'
+    if (excelUpper.includes('ACUCAR') || excelUpper.includes('AÇUCAR') || excelUpper.includes('AÇÚCAR')) return 'AÇÚCAR'
+    if (excelUpper.includes('TRIGO')) return 'TRIGO'
+    if (excelUpper.includes('ALGOD')) return 'ALGODÃO'
+    if (excelUpper.includes('FERTILIZ') || excelUpper.includes('ADUBO')) return 'FERTILIZANTE'
+    if (excelUpper.includes('MINER') || excelUpper.includes('MINÉRIO')) return 'MINÉRIO'
+    if (excelUpper.includes('CLINKER') || excelUpper.includes('CIMENTO')) return 'CLÍNKER'
+    if (excelUpper.includes('CELULOSE')) return 'CELULOSE'
+    if (excelStr.length <= 40) return excelStr.toUpperCase()
+  }
+
+  // 2. Extração dos dados da nota fiscal (nfeData ou parsedData)
+  const nfe = nota?.nfeData || nota
+  const parsed = nota?.parsedData || (nota?.prodNome ? nota : null)
+
+  const desc = nfe?.produtos?.[0]?.descricao || parsed?.prodNome || ''
+  const infCpl = nfe?.informacoesComplementares || parsed?.infCpl || ''
+  const tp = nfe?.tipoProduto || ''
+
+  const combined = `${tp} ${desc} ${infCpl} ${rawText || ''}`.toUpperCase()
+
+  if (combined.includes('FARELO') && combined.includes('SOJA')) return 'FARELO DE SOJA'
+  if (combined.includes('SOJA')) return 'SOJA'
+  if (combined.includes('MILHO')) return 'MILHO'
+  if (combined.includes('ACUCAR') || combined.includes('AÇUCAR') || combined.includes('AÇÚCAR')) return 'AÇÚCAR'
+  if (combined.includes('TRIGO')) return 'TRIGO'
+  if (combined.includes('ALGOD')) return 'ALGODÃO'
+  if (combined.includes('FERTILIZ') || combined.includes('ADUBO')) return 'FERTILIZANTE'
+  if (combined.includes('MINER') || combined.includes('MINÉRIO')) return 'MINÉRIO'
+  if (combined.includes('CLINKER') || combined.includes('CIMENTO')) return 'CLÍNKER'
+  if (combined.includes('CELULOSE')) return 'CELULOSE'
+
+  if (desc && desc.trim().length > 0) {
+    return desc.trim().toUpperCase()
+  }
+
+  if (excelStr && excelStr !== '-' && excelStr !== 'N/A') {
+    return excelStr.toUpperCase()
+  }
+
+  return 'N/I'
+}
+
+/**
+ * Extrai e formata a Data de Emissão.
+ * Se tiver rawDate (ex: '2024-03-15T...', '15/03/2024'), formata para DD/MM/AAAA.
+ * Se rawDate for nulo ou inválido, deriva MM/AAAA da Chave de Acesso (44 dígitos: AAMM nas posições 2 a 5).
+ */
+export function extractDataEmissao(rawDate?: any, key?: string): string {
+  if (rawDate instanceof Date && !isNaN(rawDate.getTime())) {
+    const d = String(rawDate.getDate()).padStart(2, '0')
+    const m = String(rawDate.getMonth() + 1).padStart(2, '0')
+    const y = rawDate.getFullYear()
+    return `${d}/${m}/${y}`
+  }
+  if (rawDate !== undefined && rawDate !== null) {
+    const s = String(rawDate).trim()
+    if (s && s !== 'Não informada' && s !== 'N/I' && s !== 'N/A' && s !== 'null' && s !== 'undefined' && s !== '-') {
+      // Formato ISO: YYYY-MM-DD...
+      if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+        const parts = s.substring(0, 10).split('-')
+        return `${parts[2]}/${parts[1]}/${parts[0]}`
+      }
+      // Formato DD/MM/YYYY ou D/M/YYYY
+      if (/^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(s)) {
+        const parts = s.split(' ')[0].split('/')
+        const d = parts[0].padStart(2, '0')
+        const m = parts[1].padStart(2, '0')
+        const y = parts[2].length === 2 ? `20${parts[2]}` : parts[2]
+        return `${d}/${m}/${y}`
+      }
+      // Formato DD-MM-YYYY
+      if (/^\d{1,2}-\d{1,2}-\d{4}/.test(s)) {
+        const parts = s.split(' ')[0].split('-')
+        const d = parts[0].padStart(2, '0')
+        const m = parts[1].padStart(2, '0')
+        return `${d}/${m}/${parts[2]}`
+      }
+      // Se for número serial do Excel (ex: 45367)
+      const num = Number(s)
+      if (!isNaN(num) && num > 30000 && num < 60000) {
+        try {
+          const date = new Date(Math.round((num - 25569) * 86400 * 1000))
+          if (!isNaN(date.getTime())) {
+            const d = String(date.getUTCDate()).padStart(2, '0')
+            const m = String(date.getUTCMonth() + 1).padStart(2, '0')
+            const y = date.getUTCFullYear()
+            return `${d}/${m}/${y}`
+          }
+        } catch {
+          // fallback
+        }
+      }
+      return s.split(' ')[0]
+    }
+  }
+  // Extrai da Chave de Acesso (44 dígitos)
+  const cleanKey = (key || '').replace(/\D/g, '')
+  if (cleanKey.length === 44) {
+    const yy = cleanKey.substring(2, 4)
+    const mm = cleanKey.substring(4, 6)
+    const mmNum = parseInt(mm, 10)
+    if (mmNum >= 1 && mmNum <= 12) {
+      return `${mm}/20${yy}`
+    }
+  }
+  return 'N/I'
+}
+
+/**
+ * Extrai o Número da NF.
+ * Se tiver rawNumero, desformata/remove zeros à esquerda.
+ * Se rawNumero for nulo ou inválido, extrai da Chave de Acesso (44 dígitos: nNF nas posições 25 a 33).
+ */
+export function extractNumeroNF(rawNumero?: any, key?: string): string {
+  if (rawNumero !== undefined && rawNumero !== null) {
+    const s = String(rawNumero).trim()
+    if (s && s !== 'N/I' && s !== 'N/A' && s !== 'Não informado' && s !== 'null' && s !== 'undefined' && s !== '-') {
+      const unpadded = s.replace(/^0+/, '')
+      return unpadded || s
+    }
+  }
+  const cleanKey = (key || '').replace(/\D/g, '')
+  if (cleanKey.length === 44) {
+    const numPart = cleanKey.substring(25, 34).replace(/^0+/, '')
+    return numPart || cleanKey.substring(25, 34)
+  }
+  return 'N/I'
+}

@@ -1,0 +1,3429 @@
+'use client'
+
+import React, { useState, useRef } from 'react'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { verifyChaveCNPJ, type NFEData, extractDataEmissao, extractNumeroNF, formatCNPJ, extractMercadoria } from '@/lib/nfe-parser'
+import {
+  type CteData,
+  processCteFile,
+  normalizarVagao,
+  extrairApenasDigitosVagao,
+} from '@/lib/cte-parser'
+import * as XLSX from 'xlsx'
+import {
+  FileSpreadsheet,
+  Upload,
+  Download,
+  AlertCircle,
+  CheckCircle2,
+  X,
+  Loader2,
+  FileCode,
+  Search,
+  Check,
+  Copy,
+  FileCheck2,
+  XCircle,
+  FileQuestion,
+  Volume2,
+  AlertTriangle,
+  Scale,
+  Bot,
+  BrainCircuit,
+  Zap,
+  CheckCheck,
+  Sparkles,
+  TrainTrack,
+  FileText,
+} from 'lucide-react'
+import {
+  auditarDivergenciasComIA,
+  conferirQuantidadesNotasPdfComIA,
+  obterQuantidadeConferidaIA,
+  type WeightAuditItemInput,
+  type WeightAuditItemResult,
+  type WeightAuditResponse,
+} from '@/lib/weight-ai-auditor'
+import { logRealtimeActivity } from '@/lib/firebase-realtime'
+import {
+  getDestinatarioContractByCnpj,
+  getDestinatarioNomenclatureByCnpj,
+  getRemetenteNomenclatureByCnpj,
+} from '@/lib/cadastros-logisticos-service'
+
+interface ProcessedFile {
+  fileName: string
+  originalPath: string
+  xmlContent: string
+  nfeData: NFEData | null
+  error: string | null
+  fileType?: 'pdf' | 'xml'
+  isPdf?: boolean
+  parsedData?: any
+  rawSnippet?: string
+}
+
+interface ExcelMatchInfo {
+  row: number
+  rawValue: string
+  sheetName: string
+  pesoSelecionado?: number | null
+  pesoSelecionadoStr?: string
+  pesoNotaVagao?: number | null
+  pesoNotaVagaoStr?: string
+  tara?: number | null
+  taraStr?: string
+  vagao?: string
+  pesoBruto?: number | null
+  pesoBrutoStr?: string
+  dataEmissao?: string
+  numero?: string
+  mercadoria?: string
+}
+
+export interface WagonSummary {
+  vagao: string
+  sheetName: string
+  qtdNotas: number
+  somaPesoNotaVagao: number
+  somaPesoNotaVagaoStr: string
+  tara: number
+  taraStr: string
+  pesoBrutoTotal: number
+  pesoBrutoTotalStr: string
+  linhas: string
+  mercadoria?: string
+}
+
+export interface ExcelRowRecord {
+  id: string
+  sheetName: string
+  row: number
+  key?: string
+  vagao?: string
+  pesoSelecionado?: number | null
+  pesoSelecionadoStr?: string
+  pesoNotaVagao?: number | null
+  pesoNotaVagaoStr?: string
+  tara?: number | null
+  taraStr?: string
+  pesoBruto?: number | null
+  pesoBrutoStr?: string
+  rawValue?: string
+  hasData?: boolean
+  dataEmissao?: string
+  numero?: string
+  mercadoria?: string
+}
+
+interface ExcelData {
+  fileName: string
+  totalRows: number
+  keysMap: Map<string, ExcelMatchInfo>
+  allKeysList: string[]
+  allRowsList: ExcelRowRecord[]
+  sheets: string[]
+  wagonSummaries?: WagonSummary[]
+}
+
+export function confrontWeights(
+  matchInfo: ExcelMatchInfo | null | undefined,
+  qtdNota: number
+) {
+  const pesoNotaVagaoStr = matchInfo?.pesoNotaVagaoStr || 'N/A'
+  const taraStr = matchInfo?.taraStr || 'N/A'
+  const vagao = matchInfo?.vagao || ''
+  const pesoBrutoStr = matchInfo?.pesoBrutoStr || 'N/A'
+
+  if (!matchInfo || matchInfo.pesoSelecionado === undefined || matchInfo.pesoSelecionado === null) {
+    return {
+      pesoExcel: null as number | null,
+      pesoExcelStr: 'N/A',
+      pesoNotaVagaoStr,
+      taraStr,
+      vagao,
+      pesoBrutoStr,
+      qtdNota,
+      diferenca: 0,
+      status: 'SEM_PESO_EXCEL' as const,
+      statusLabel: 'S/ PESO EXCEL',
+      detalhes: 'Coluna "Peso Selecionado" não encontrada ou sem valor no Excel',
+    }
+  }
+
+  const pesoExcel = matchInfo.pesoSelecionado
+  const pesoExcelStr = matchInfo.pesoSelecionadoStr || String(pesoExcel)
+
+  let diff = Math.abs(pesoExcel - qtdNota)
+  let isEquivalentUnit = false
+
+  // Checar equivalência de unidades (TON vs KG, ex: 47,76 TON vs 47760 KG)
+  if (diff > 0.01) {
+    if (Math.abs(pesoExcel * 1000 - qtdNota) < 1) {
+      isEquivalentUnit = true
+      diff = 0
+    } else if (Math.abs(pesoExcel - qtdNota * 1000) < 1) {
+      isEquivalentUnit = true
+      diff = 0
+    }
+  }
+
+  if (diff <= 0.01) {
+    return {
+      pesoExcel,
+      pesoExcelStr,
+      pesoNotaVagaoStr,
+      taraStr,
+      vagao,
+      pesoBrutoStr,
+      qtdNota,
+      diferenca: 0,
+      status: 'CONFERE' as const,
+      statusLabel: 'PESO CONFERE',
+      detalhes: isEquivalentUnit
+        ? `Valores equivalentes (Excel: ${pesoExcelStr} | Nota: ${qtdNota})`
+        : `Valores batem (Excel: ${pesoExcelStr} | Nota: ${qtdNota})`,
+    }
+  }
+
+  const diferencaReal = pesoExcel - qtdNota
+  return {
+    pesoExcel,
+    pesoExcelStr,
+    pesoNotaVagaoStr,
+    taraStr,
+    vagao,
+    pesoBrutoStr,
+    qtdNota,
+    diferenca: diferencaReal,
+    status: 'DIVERGENTE' as const,
+    statusLabel: `DIVERGÊNCIA (${diferencaReal > 0 ? '+' : ''}${diferencaReal.toLocaleString('pt-BR', { maximumFractionDigits: 3 })})`,
+    detalhes: `Excel (${pesoExcelStr}) ≠ Nota (${qtdNota.toLocaleString('pt-BR')}) | Dif: ${diferencaReal.toLocaleString('pt-BR')}`,
+  }
+}
+
+const parseBRFloat = (val: string | number | undefined | null): number => {
+  if (val === undefined || val === null) return 0
+  if (typeof val === 'number') return isNaN(val) ? 0 : val
+  const str = String(val).trim()
+  if (!str) return 0
+  if (str.includes(',')) {
+    const cleanStr = str.replace(/\./g, '').replace(',', '.')
+    const num = parseFloat(cleanStr)
+    return isNaN(num) ? 0 : num
+  }
+  const num = parseFloat(str)
+  return isNaN(num) ? 0 : num
+}
+
+const getFileQuantidade = (f: ProcessedFile): number => {
+  // 1. Verificar Peso Líquido do Transportador
+  if (f.nfeData?.transportador?.pesoLiquido && Number(f.nfeData.transportador.pesoLiquido) > 0) {
+    return Number(f.nfeData.transportador.pesoLiquido)
+  }
+
+  if (f.parsedData?.transpPesoL) {
+    const rawL = String(f.parsedData.transpPesoL).trim()
+    const numL = rawL.includes(',') ? parseFloat(rawL.replace(/\./g, '').replace(',', '.')) : parseFloat(rawL)
+    if (!isNaN(numL) && numL > 0) return numL
+  }
+
+  // 2. Verificar Itens / Dados dos Produtos (Coluna QUANT)
+  if (f.nfeData?.itens && f.nfeData.itens.length > 0) {
+    const sumItens = f.nfeData.itens.reduce((acc, item) => acc + (Number(item.quantidade) || 0), 0)
+    if (sumItens > 0) return sumItens
+  }
+
+  if (f.parsedData) {
+    if (f.parsedData.prodQCom !== undefined && f.parsedData.prodQCom !== null && !isNaN(Number(f.parsedData.prodQCom)) && Number(f.parsedData.prodQCom) > 0) {
+      return Number(f.parsedData.prodQCom)
+    }
+    if (f.parsedData.quantidade !== undefined && f.parsedData.quantidade !== null && !isNaN(Number(f.parsedData.quantidade)) && Number(f.parsedData.quantidade) > 0) {
+      return Number(f.parsedData.quantidade)
+    }
+  }
+
+  // 3. Verificar Quantidade de Volumes do Transporte
+  if (f.nfeData?.transportador?.quantidade) {
+    const transpQtd = Number(f.nfeData.transportador.quantidade) || 0
+    if (transpQtd > 0) return transpQtd
+  }
+
+  if (f.parsedData?.transpQVol) {
+    const rawV = String(f.parsedData.transpQVol).trim()
+    const numV = rawV.includes(',') ? parseFloat(rawV.replace(/\./g, '').replace(',', '.')) : parseFloat(rawV)
+    if (!isNaN(numV) && numV > 0) return numV
+  }
+
+  // 4. Fallback no texto bruto (rawSnippet / xmlContent) procurando a coluna QUANT, TON ou Peso Líquido
+  const textToSearch = `${f.rawSnippet || ''} ${f.xmlContent || ''}`
+  if (textToSearch.length > 10) {
+    // Ex: "47.020,00 QUILOGRAMA 73.800,00 47.020,00"
+    const vol4ColMatch = textToSearch.match(/(?:QUANTIDADE\s+ESP[EÉ]CIE[\s\S]{1,160}?|\b)(\d{1,3}(?:\.\d{3})+,\d{2}|\b\d{2,6},\d{2}\b)\s+[A-Za-zÀ-Ú]+\s+(?:\d{1,3}(?:\.\d{3})+,\d{2}|\b\d{2,6},\d{2}\b)\s+(\d{1,3}(?:\.\d{3})+,\d{2}|\b\d{2,6},\d{2}\b)/i)
+    if (vol4ColMatch && vol4ColMatch[2]) {
+      const qVal = parseFloat(vol4ColMatch[2].replace(/\./g, '').replace(',', '.'))
+      if (qVal > 0) return qVal
+    }
+
+    // Ex: "PESO LÍQUIDO 47.020,00" ou "PESO LIQUIDO: 47.020,00"
+    const pesoLMatch = textToSearch.match(/(?:PESO\s+(?:L[ÍI]QUIDO|LIQ)|P\.\s*L[ÍI]Q)[\s\S]{0,30}?(\d{1,3}(?:\.\d{3})+,\d{2}|\b\d{2,6},\d{2}\b)/i)
+    if (pesoLMatch) {
+      const qVal = parseFloat(pesoLMatch[1].replace(/\./g, '').replace(',', '.'))
+      if (qVal > 0) return qVal
+    }
+
+    // Ex: "5504 TON 47,02" ou "TON 47,02"
+    const quantTonMatch = textToSearch.match(/(?:5\d{3}|6\d{3})?\s*(?:TON|TONELADA|TO|T)\s+(\d{1,3}(?:\.\d{3})+,\d{1,4}|\b\d+,\d{1,4}\b|\b\d{1,3}(?:\.\d{3})+\b)/i)
+    if (quantTonMatch) {
+      const qVal = parseFloat(quantTonMatch[1].replace(/\./g, '').replace(',', '.'))
+      if (qVal > 0) return qVal
+    }
+
+    // XML tag <pesoL> ou <qCom>
+    const xmlPesoLMatch = textToSearch.match(/<pesoL>([^<]+)<\/pesoL>/i)
+    if (xmlPesoLMatch) {
+      const qVal = parseFloat(xmlPesoLMatch[1].replace(/\./g, '').replace(',', '.'))
+      if (qVal > 0) return qVal
+    }
+
+    const xmlQComMatch = textToSearch.match(/<qCom>([^<]+)<\/qCom>/i)
+    if (xmlQComMatch) {
+      const qVal = parseFloat(xmlQComMatch[1].replace(/\./g, '').replace(',', '.'))
+      if (qVal > 0) return qVal
+    }
+
+    const quantDirectMatch = textToSearch.match(/(?:QUANT(?:IDADE|\.)?|QTD)\s*[:=-]?\s*(\d{1,3}(?:\.\d{3})+,\d{1,4}|\b\d+,\d{1,4}\b|\b\d{1,3}(?:\.\d{3})+\b)/i)
+    if (quantDirectMatch) {
+      const qVal = parseFloat(quantDirectMatch[1].replace(/\./g, '').replace(',', '.'))
+      if (qVal > 0) return qVal
+    }
+  }
+
+  return 0
+}
+
+function buildAuditSnippet(f: ProcessedFile, qtdNota: number, key: string, matchInfo: any): string {
+  const parts: string[] = []
+  
+  parts.push(`NF: ${f.nfeData?.numero || ''} | Série: ${f.nfeData?.serie || ''} | Chave: ${key}`)
+  parts.push(`Emitente: ${f.nfeData?.emitente?.nome || ''} (CNPJ: ${f.nfeData?.emitente?.cnpj || ''})`)
+  parts.push(`Destinatário: ${f.nfeData?.destinatario?.nome || ''} (CNPJ: ${f.nfeData?.destinatario?.cpfCnpj || ''})`)
+  
+  if (f.nfeData?.itens && f.nfeData.itens.length > 0) {
+    parts.push(`--- DADOS DOS PRODUTOS / SERVIÇOS ---`)
+    f.nfeData.itens.forEach((it, idx) => {
+      parts.push(`Item ${idx + 1}: Código: ${it.codigo || ''} | Descrição: ${it.descricao || ''} | NCM: ${it.ncm || ''} | CFOP: ${it.cfop || ''} | UN: ${it.unidade || ''} | QUANT: ${it.quantidade} | Valor Unit: ${it.valorUnitario || ''} | Valor Total: ${it.valorTotal || ''}`)
+    })
+  } else if (f.parsedData) {
+    parts.push(`--- DADOS DOS PRODUTOS / SERVIÇOS ---`)
+    parts.push(`Código: ${f.parsedData.prodCodigo || ''} | Descrição: ${f.parsedData.prodNome || ''} | NCM: ${f.parsedData.prodNCM || ''} | CFOP: ${f.parsedData.prodCFOP || ''} | UN: ${f.parsedData.prodUCom || ''} | QUANT: ${f.parsedData.prodQCom || ''} | Valor Total: ${f.parsedData.prodVProd || ''}`)
+  }
+
+  parts.push(`--- TRANSPORTADOR / VOLUMES TRANSPORTADOS ---`)
+  parts.push(`Peso Líquido: ${f.nfeData?.transportador?.pesoLiquido || f.parsedData?.transpPesoL || '0'} | Peso Bruto: ${f.nfeData?.transportador?.pesoBruto || f.parsedData?.transpPesoB || '0'} | Quantidade Volumes: ${f.nfeData?.transportador?.quantidade || f.parsedData?.transpQVol || '0'} | Espécie: ${f.nfeData?.transportador?.especie || f.parsedData?.transpEsp || ''}`)
+
+  if (f.nfeData?.informacoesComplementares || f.parsedData?.infCpl) {
+    parts.push(`--- INFORMAÇÕES COMPLEMENTARES ---`)
+    parts.push(f.nfeData?.informacoesComplementares || f.parsedData?.infCpl || '')
+  }
+
+  if (f.rawSnippet) {
+    parts.push(`--- TRECHO BRUTO DA DANFE / DOCUMENTO ---`)
+    parts.push(f.rawSnippet.substring(0, 3000))
+  } else if (f.xmlContent) {
+    parts.push(`--- XML DO DOCUMENTO ---`)
+    parts.push(f.xmlContent.substring(0, 3000))
+  }
+
+  if (matchInfo) {
+    parts.push(`--- DADOS CONFRONTADOS NA PLANILHA EXCEL ---`)
+    parts.push(`Linha: ${matchInfo.row} | Vagão: ${matchInfo.vagao || 'N/A'} | Peso Selecionado no Excel: ${matchInfo.pesoSelecionadoStr || matchInfo.pesoSelecionado} | Peso Nota Vagão: ${matchInfo.pesoNotaVagaoStr || ''} | Tara: ${matchInfo.taraStr || ''} | Peso Bruto Excel: ${matchInfo.pesoBrutoStr || ''}`)
+  }
+
+  return parts.join('\n')
+}
+
+interface ExcelReconciliationTabProps {
+  files: ProcessedFile[]
+  speakText?: (text: string) => void
+  onSelectFile?: (index: number) => void
+  externalAuditMap?: Record<string, WeightAuditItemResult>
+  onUpdateAuditMap?: (map: Record<string, WeightAuditItemResult>) => void
+  sharedExcelFile?: File | null
+}
+
+export function ExcelReconciliationTab({
+  files,
+  speakText,
+  onSelectFile,
+  externalAuditMap,
+  onUpdateAuditMap,
+  sharedExcelFile,
+}: ExcelReconciliationTabProps) {
+  const [excelData, setExcelData] = useState<ExcelData | null>(null)
+  const [rawWorkbook, setRawWorkbook] = useState<XLSX.WorkBook | null>(null)
+  const [excelFileName, setExcelFileName] = useState<string>('')
+  const [isExcelLoading, setIsExcelLoading] = useState<boolean>(false)
+  const [availableExcelColumns, setAvailableExcelColumns] = useState<string[]>([])
+  const [selectedExcelWeightCol, setSelectedExcelWeightCol] = useState<string>('auto')
+  const [excelFilter, setExcelFilter] = useState<'all' | 'matched' | 'unmatched' | 'excel_only' | 'weight_divergent'>('all')
+  const [excelSearchQuery, setExcelSearchQuery] = useState<string>('')
+  const [copiedKey, setCopiedKey] = useState<string | null>(null)
+
+  // Estados para CT-e (Conhecimento de Transporte Eletrônico - Transbordo / Expedidor)
+  const [cteList, setCteList] = useState<CteData[]>([])
+  const [isCteLoading, setIsCteLoading] = useState<boolean>(false)
+  const [cteUploadFeedback, setCteUploadFeedback] = useState<string | null>(null)
+  const cteInputRef = useRef<HTMLInputElement>(null)
+
+  const handleCteFilesUpload = async (filesToProcess: FileList | File[]) => {
+    const fileArray = Array.from(filesToProcess).filter((f) => {
+      const lower = f.name.toLowerCase()
+      return lower.endsWith('.pdf') || lower.endsWith('.xml')
+    })
+
+    if (fileArray.length === 0) {
+      alert('Nenhum arquivo PDF (DACTE) ou XML de CT-e válido selecionado.')
+      return
+    }
+
+    setIsCteLoading(true)
+    try {
+      const parsedList: CteData[] = []
+      for (const file of fileArray) {
+        try {
+          const cte = await processCteFile(file)
+          if (cte) {
+            parsedList.push(cte)
+          }
+        } catch (err) {
+          console.warn(`Erro ao processar CT-e ${file.name}:`, err)
+        }
+      }
+
+      if (parsedList.length > 0) {
+        setCteList((prev) => {
+          const existingKeys = new Set(prev.map((c) => c.chaveAcesso || c.fileName))
+          const newOnes = parsedList.filter((c) => !existingKeys.has(c.chaveAcesso || c.fileName))
+          return [...prev, ...newOnes]
+        })
+
+        const totalVagoes = parsedList.reduce((acc, c) => acc + (c.vagoes?.length || 0), 0)
+        const expedidoresNomes = Array.from(
+          new Set(
+            parsedList
+              .map((c) => c.expedidor?.nome || c.expedidor?.cnpjCpfFormatado || c.expedidor?.cnpjCpf)
+              .filter(Boolean)
+          )
+        ).join(', ')
+
+        setCteUploadFeedback(
+          `${parsedList.length} CT-e(s) processado(s) com sucesso! ${
+            totalVagoes > 0 ? `${totalVagoes} vagão(ões) identificados.` : ''
+          } Expedidor (Transbordo): ${expedidoresNomes || 'Identificado'}`
+        )
+        setTimeout(() => setCteUploadFeedback(null), 9000)
+      } else {
+        alert('Nenhum CT-e válido com informações de expedidor/transbordo pôde ser extraído dos arquivos selecionados.')
+      }
+    } catch (err) {
+      console.error('Erro ao ler arquivos de CT-e:', err)
+      alert('Erro ao processar arquivos de CT-e.')
+    } finally {
+      setIsCteLoading(false)
+    }
+  }
+
+  const handleRemoveAllCtes = () => {
+    setCteList([])
+    setCteUploadFeedback(null)
+  }
+
+  // Estados para Auditoria de IA
+  const [auditResultsMap, setAuditResultsMap] = useState<Record<string, WeightAuditItemResult>>(externalAuditMap || {})
+  const [overrideWeightsMap, setOverrideWeightsMap] = useState<Record<string, number>>({})
+  const [auditSummary, setAuditSummary] = useState<WeightAuditResponse | null>(null)
+  const [isAuditingAllWeights, setIsAuditingAllWeights] = useState<boolean>(false)
+  const [isExportingExcelWithAI, setIsExportingExcelWithAI] = useState<boolean>(false)
+  const [auditingKey, setAuditingKey] = useState<string | null>(null)
+
+  React.useEffect(() => {
+    if (externalAuditMap && Object.keys(externalAuditMap).length > 0) {
+      setAuditResultsMap((prev) => ({ ...prev, ...externalAuditMap }))
+    }
+  }, [externalAuditMap])
+
+  const excelInputRef = useRef<HTMLInputElement>(null)
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text)
+    setCopiedKey(text)
+    setTimeout(() => setCopiedKey(null), 2000)
+  }
+
+  const processExcelWorkbook = (
+    workbook: XLSX.WorkBook,
+    fileName: string,
+    weightColumnChoice: string = selectedExcelWeightCol
+  ) => {
+    const keysMap = new Map<string, ExcelMatchInfo>()
+    const allKeysList: string[] = []
+    const allRowsList: ExcelRowRecord[] = []
+    let totalRows = 0
+    const allColsSet = new Set<string>()
+
+    const globalWagonMap = new Map<string, { vagao: string; sheetName: string; sumPeso: number; tara: number; count: number; rows: number[] }>()
+
+    // Pré-análise: contar chaves de 44 dígitos e dados válidos por aba
+    const sheetKeyCounts = new Map<string, number>()
+    let totalKeysInWorkbook = 0
+
+    workbook.SheetNames.forEach((sheetName) => {
+      const ws = workbook.Sheets[sheetName]
+      if (!ws) return
+      const sRows: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' })
+      let count = 0
+      sRows.forEach((row) => {
+        if (!Array.isArray(row)) return
+        row.forEach((cell) => {
+          if (cell === undefined || cell === null) return
+          const cellStr = String(cell).trim()
+          if (cellStr.length < 40) return
+          const digits = cellStr.replace(/\D/g, '')
+          if (digits.length === 44 || (digits.length > 44 && cellStr.match(/\b\d{44}\b/))) {
+            count++
+          }
+        })
+      })
+      sheetKeyCounts.set(sheetName, count)
+      totalKeysInWorkbook += count
+    })
+
+    // Filtrar apenas abas relevantes: se o arquivo tem abas com chaves de 44 dígitos, ignorar abas auxiliares vazias
+    const targetSheetNames = totalKeysInWorkbook > 0
+      ? workbook.SheetNames.filter((s) => (sheetKeyCounts.get(s) || 0) > 0)
+      : workbook.SheetNames
+
+    targetSheetNames.forEach((sheetName) => {
+      const worksheet = workbook.Sheets[sheetName]
+      const rows: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: false, defval: '' })
+      totalRows += rows.length
+
+      // Coletar nomes de todas as colunas
+      for (let r = 0; r < Math.min(rows.length, 10); r++) {
+        const headerRow = rows[r]
+        if (!headerRow) continue
+        headerRow.forEach((c) => {
+          const colName = String(c || '').trim()
+          if (colName && colName.length < 80 && !allColsSet.has(colName)) {
+            allColsSet.add(colName)
+          }
+        })
+      }
+
+      // Identificar colunas no cabeçalho
+      let pesoColIndex = -1
+      let pesoNotaVagaoColIndex = -1
+      let taraColIndex = -1
+      let vagaoColIndex = -1
+      let brutoColIndex = -1
+      let dataEmissaoColIndex = -1
+      let numeroColIndex = -1
+      let mercadoriaColIndex = -1
+
+      for (let r = 0; r < Math.min(rows.length, 30); r++) {
+        const headerRow = rows[r]
+        if (!headerRow) continue
+        for (let c = 0; c < headerRow.length; c++) {
+          const cellStr = String(headerRow[c] || '').trim().toLowerCase()
+
+          if (
+            pesoNotaVagaoColIndex === -1 &&
+            (cellStr.includes('peso_nota_vagao') ||
+              cellStr.includes('peso nota vagao') ||
+              cellStr.includes('peso_nota_vagão') ||
+              cellStr.includes('peso nota vagão') ||
+              cellStr.includes('peso_vagao') ||
+              cellStr.includes('peso vagao') ||
+              cellStr.includes('peso_rateado'))
+          ) {
+            pesoNotaVagaoColIndex = c
+          }
+
+          if (
+            taraColIndex === -1 &&
+            (cellStr === 'tara' ||
+              cellStr.includes('tara_vagao') ||
+              cellStr.includes('tara vagao') ||
+              cellStr.includes('tara_vagão') ||
+              cellStr.includes('tara(kg)') ||
+              cellStr.includes('tara (kg)') ||
+              cellStr.includes('tara (t)'))
+          ) {
+            taraColIndex = c
+          }
+
+          if (
+            vagaoColIndex === -1 &&
+            (cellStr === 'vagao' ||
+              cellStr === 'vagão' ||
+              cellStr.includes('vagao') ||
+              cellStr.includes('vagão') ||
+              cellStr.includes('n_vagao') ||
+              cellStr.includes('num_vagao'))
+          ) {
+            vagaoColIndex = c
+          }
+
+          if (
+            brutoColIndex === -1 &&
+            (cellStr.includes('peso_bruto') ||
+              cellStr.includes('peso bruto') ||
+              cellStr.includes('bruto(kg)') ||
+              cellStr.includes('bruto (kg)') ||
+              cellStr.includes('bruto (t)'))
+          ) {
+            brutoColIndex = c
+          }
+
+          if (
+            dataEmissaoColIndex === -1 &&
+            (cellStr === 'data' ||
+              cellStr === 'dt_emissao' ||
+              cellStr === 'dt emissao' ||
+              cellStr === 'data_emissao' ||
+              cellStr === 'data emissao' ||
+              cellStr.includes('data_emissao') ||
+              cellStr.includes('data emissao') ||
+              cellStr.includes('data_emissão') ||
+              cellStr.includes('data emissão') ||
+              cellStr.includes('data_de_emissao') ||
+              cellStr.includes('data de emissao') ||
+              cellStr.includes('dhemi') ||
+              cellStr.includes('demi') ||
+              cellStr.includes('dt. emiss') ||
+              cellStr.includes('dt.emiss'))
+          ) {
+            dataEmissaoColIndex = c
+          }
+
+          if (
+            numeroColIndex === -1 &&
+            (cellStr === 'numero' ||
+              cellStr === 'número' ||
+              cellStr === 'nfe' ||
+              cellStr === 'nf' ||
+              cellStr === 'num' ||
+              cellStr.includes('numero_nf') ||
+              cellStr.includes('numero da nota') ||
+              cellStr.includes('nº nota') ||
+              cellStr.includes('num_nf') ||
+              cellStr.includes('nr_nota') ||
+              cellStr.includes('nnf'))
+          ) {
+            numeroColIndex = c
+          }
+
+          if (
+            mercadoriaColIndex === -1 &&
+            (cellStr === 'mercadoria' ||
+              cellStr === 'mercadorias' ||
+              cellStr === 'produto' ||
+              cellStr === 'produtos' ||
+              cellStr === 'merc' ||
+              cellStr === 'prod' ||
+              cellStr.includes('mercadoria') ||
+              cellStr.includes('mercadorias') ||
+              cellStr.includes('produto') ||
+              cellStr.includes('produtos') ||
+              cellStr === 'commodity')
+          ) {
+            mercadoriaColIndex = c
+          }
+
+          if (weightColumnChoice === 'none') {
+            pesoColIndex = -999
+          } else if (weightColumnChoice && weightColumnChoice !== 'auto') {
+            if (String(headerRow[c] || '').trim().toLowerCase() === weightColumnChoice.trim().toLowerCase()) {
+              pesoColIndex = c
+            }
+          } else if (
+            pesoColIndex === -1 &&
+            (cellStr.includes('peso_selecionado') ||
+              cellStr.includes('peso selecionado') ||
+              cellStr.includes('peso_liquido') ||
+              cellStr.includes('peso liquido') ||
+              cellStr.includes('peso_líquido') ||
+              cellStr.includes('peso líquido') ||
+              cellStr.includes('pesoliquido') ||
+              cellStr.includes('peso_liq') ||
+              cellStr.includes('peso liq') ||
+              cellStr.includes('qtd_nota') ||
+              cellStr.includes('quantidade'))
+          ) {
+            pesoColIndex = c
+          }
+        }
+      }
+
+      // Varredura das linhas da aba: Passo 1 - Mapear e acumular todos os rateios (PESO_NOTA_VAGAO) e TARA ÚNICA de cada vagão
+      rows.forEach((row, rowIndex) => {
+        const rowNumber = rowIndex + 1
+        if (!Array.isArray(row)) return
+
+        let rowVagao = ''
+        let rowPesoNotaVagao: number | null = null
+        let rowPesoSel: number | null = null
+        let rowTara: number | null = null
+        let rowBruto: number | null = null
+
+        if (vagaoColIndex !== -1 && row[vagaoColIndex] !== undefined && row[vagaoColIndex] !== null) {
+          const vStr = String(row[vagaoColIndex]).trim()
+          if (vStr) rowVagao = vStr
+        }
+
+        if (pesoNotaVagaoColIndex !== -1 && row[pesoNotaVagaoColIndex] !== undefined && row[pesoNotaVagaoColIndex] !== null) {
+          const pVal = parseBRFloat(row[pesoNotaVagaoColIndex])
+          if (pVal > 0) rowPesoNotaVagao = pVal
+        }
+
+        if (pesoColIndex >= 0 && row[pesoColIndex] !== undefined && row[pesoColIndex] !== null) {
+          const pVal = parseBRFloat(row[pesoColIndex])
+          if (pVal > 0) rowPesoSel = pVal
+        }
+
+        if (taraColIndex !== -1 && row[taraColIndex] !== undefined && row[taraColIndex] !== null) {
+          const tVal = parseBRFloat(row[taraColIndex])
+          if (tVal > 0) rowTara = tVal
+        }
+
+        if (brutoColIndex !== -1 && row[brutoColIndex] !== undefined && row[brutoColIndex] !== null) {
+          const bVal = parseBRFloat(row[brutoColIndex])
+          if (bVal > 0) rowBruto = bVal
+        }
+
+        if (rowVagao) {
+          const vagaoKey = `${sheetName}_${rowVagao.toUpperCase()}`
+          const cleanVagaoKey = rowVagao.replace(/[^A-Za-z0-9]/g, '').toUpperCase()
+          const existing = globalWagonMap.get(vagaoKey) || globalWagonMap.get(cleanVagaoKey) || {
+            vagao: rowVagao,
+            sheetName,
+            sumPeso: 0,
+            tara: 0,
+            count: 0,
+            rows: [],
+          }
+          const effPeso = (rowPesoNotaVagao && rowPesoNotaVagao > 0) ? rowPesoNotaVagao : (rowPesoSel && rowPesoSel > 0 ? rowPesoSel : 0)
+          if (effPeso > 0) {
+            existing.sumPeso += effPeso
+          }
+          if (rowTara && rowTara > 0 && (!existing.tara || rowTara > existing.tara)) {
+            existing.tara = rowTara
+          }
+          existing.count += 1
+          existing.rows.push(rowNumber)
+          globalWagonMap.set(vagaoKey, existing)
+          if (cleanVagaoKey) {
+            globalWagonMap.set(cleanVagaoKey, existing)
+          }
+        }
+      })
+
+      // Passo 2 - Varredura para alimentar keysMap e associar o PESO BRUTO REAL DO VAGÃO (Soma de todos os rateios + Tara única)
+      rows.forEach((row, rowIndex) => {
+        const rowNumber = rowIndex + 1
+        if (!Array.isArray(row)) return
+
+        let rowVagao = ''
+        let rowPesoNotaVagao: number | null = null
+        let rowTara: number | null = null
+        let rowBruto: number | null = null
+
+        if (vagaoColIndex !== -1 && row[vagaoColIndex] !== undefined && row[vagaoColIndex] !== null) {
+          const vStr = String(row[vagaoColIndex]).trim()
+          if (vStr) rowVagao = vStr
+        }
+
+        if (pesoNotaVagaoColIndex !== -1 && row[pesoNotaVagaoColIndex] !== undefined && row[pesoNotaVagaoColIndex] !== null) {
+          const pVal = parseBRFloat(row[pesoNotaVagaoColIndex])
+          if (pVal > 0) rowPesoNotaVagao = pVal
+        }
+
+        if (taraColIndex !== -1 && row[taraColIndex] !== undefined && row[taraColIndex] !== null) {
+          const tVal = parseBRFloat(row[taraColIndex])
+          if (tVal > 0) rowTara = tVal
+        }
+
+        if (brutoColIndex !== -1 && row[brutoColIndex] !== undefined && row[brutoColIndex] !== null) {
+          const bVal = parseBRFloat(row[brutoColIndex])
+          if (bVal > 0) rowBruto = bVal
+        }
+
+        const vagaoKey = rowVagao ? `${sheetName}_${rowVagao.toUpperCase()}` : ''
+        const cleanVagaoKey = rowVagao ? rowVagao.replace(/[^A-Za-z0-9]/g, '').toUpperCase() : ''
+        const wagonInfo = vagaoKey ? (globalWagonMap.get(vagaoKey) || (cleanVagaoKey ? globalWagonMap.get(cleanVagaoKey) : null)) : null
+
+        const effTara = (wagonInfo && wagonInfo.tara > 0) ? wagonInfo.tara : (rowTara || 0)
+        const effSumPeso = (wagonInfo && wagonInfo.sumPeso > 0) ? wagonInfo.sumPeso : (rowPesoNotaVagao || 0)
+
+        // O BRUTO DO VAGÃO É A SOMA DE TODOS OS RATEIOS DA COLUNA PESO_NOTA_VAGAO + A TARA ÚNICA DO VAGÃO
+        const calculatedBruto = (effTara > 0 || effSumPeso > 0)
+          ? Math.round((effTara + effSumPeso) * 1000) / 1000
+          : ((rowTara || 0) + (rowPesoNotaVagao || 0) > 0 ? Math.round(((rowTara || 0) + (rowPesoNotaVagao || 0)) * 1000) / 1000 : rowBruto)
+
+        const pesoBrutoStr = calculatedBruto
+          ? calculatedBruto.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 3 })
+          : undefined
+
+        // Buscar Chaves de 44 dígitos
+        const potentialKeys: { key: string; cellStr: string }[] = []
+        row.forEach((cell, colIndex) => {
+          if (cell === undefined || cell === null) return
+          const cellStr = String(cell).trim()
+          if (cellStr.length < 40) return
+
+          const cleanedForDigits = cellStr.replace(/\D/g, '')
+
+          if (cleanedForDigits.length === 44) {
+            potentialKeys.push({ key: cleanedForDigits, cellStr })
+          } else if (cleanedForDigits.length > 44) {
+            const matches = cellStr.match(/\b\d{44}\b/g)
+            if (matches) {
+              matches.forEach(m => potentialKeys.push({ key: m, cellStr }))
+            } else {
+              for (let i = 0; i <= cleanedForDigits.length - 44; i += 44) {
+                potentialKeys.push({ key: cleanedForDigits.substring(i, i + 44), cellStr })
+              }
+            }
+          }
+        })
+
+        let pesoSelecionado: number | null = null
+        let pesoSelecionadoStr: string | undefined = undefined
+
+        if (pesoColIndex >= 0 && row[pesoColIndex] !== undefined && row[pesoColIndex] !== null) {
+          const rawP = String(row[pesoColIndex]).trim()
+          const pNum = parseBRFloat(rawP)
+          if (pNum > 0) {
+            pesoSelecionado = pNum
+            pesoSelecionadoStr = rawP
+          }
+        }
+
+        const pesoNotaVagaoStr = rowPesoNotaVagao
+          ? rowPesoNotaVagao.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 3 })
+          : undefined
+        const taraFinalNum = effTara > 0 ? effTara : rowTara
+        const taraStr = taraFinalNum
+          ? taraFinalNum.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 3 })
+          : undefined
+
+        let rowDataEmissao = ''
+        if (dataEmissaoColIndex !== -1 && row[dataEmissaoColIndex] !== undefined && row[dataEmissaoColIndex] !== null) {
+          const val = String(row[dataEmissaoColIndex]).trim()
+          if (val) rowDataEmissao = val
+        } else {
+          for (let c = 0; c < row.length; c++) {
+            const val = String(row[c] || '').trim()
+            if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(val) || /^\d{4}-\d{2}-\d{2}/.test(val)) {
+              rowDataEmissao = val
+              break
+            }
+          }
+        }
+
+        let rowNumero = ''
+        if (numeroColIndex !== -1 && row[numeroColIndex] !== undefined && row[numeroColIndex] !== null) {
+          const val = String(row[numeroColIndex]).trim()
+          if (val) rowNumero = val
+        }
+
+        if (potentialKeys.length > 0) {
+          potentialKeys.forEach(({ key: cleanKey, cellStr }) => {
+            if (cleanKey.length === 44) {
+              if (!keysMap.has(cleanKey)) {
+                const matchInfo: ExcelMatchInfo = {
+                  row: rowNumber,
+                  rawValue: cellStr,
+                  sheetName,
+                  pesoSelecionado,
+                  pesoSelecionadoStr,
+                  pesoNotaVagao: rowPesoNotaVagao,
+                  pesoNotaVagaoStr,
+                  tara: taraFinalNum,
+                  taraStr,
+                  vagao: rowVagao,
+                  pesoBruto: calculatedBruto,
+                  pesoBrutoStr,
+                  dataEmissao: rowDataEmissao,
+                  numero: rowNumero,
+                }
+                keysMap.set(cleanKey, matchInfo)
+                allKeysList.push(cleanKey)
+              }
+
+              allRowsList.push({
+                id: `${sheetName}_r${rowNumber}_${cleanKey}`,
+                sheetName,
+                row: rowNumber,
+                key: cleanKey,
+                vagao: rowVagao,
+                pesoSelecionado,
+                pesoSelecionadoStr,
+                pesoNotaVagao: rowPesoNotaVagao,
+                pesoNotaVagaoStr,
+                tara: taraFinalNum,
+                taraStr,
+                pesoBruto: calculatedBruto,
+                pesoBrutoStr,
+                rawValue: cellStr,
+                hasData: true,
+                dataEmissao: rowDataEmissao,
+                numero: rowNumero,
+              })
+            }
+          })
+        } else {
+          // Linha do Excel sem chave de 44 dígitos, mas contendo dados (vagão, tara, peso, etc.)
+          const hasAnyUsefulData = Boolean(rowVagao || rowPesoNotaVagao || pesoSelecionado || rowTara || rowBruto || row.some(c => String(c || '').trim() !== ''))
+          if (hasAnyUsefulData) {
+            allRowsList.push({
+              id: `${sheetName}_r${rowNumber}_nokey`,
+              sheetName,
+              row: rowNumber,
+              key: undefined,
+              vagao: rowVagao,
+              pesoSelecionado,
+              pesoSelecionadoStr,
+              pesoNotaVagao: rowPesoNotaVagao,
+              pesoNotaVagaoStr,
+              tara: taraFinalNum,
+              taraStr,
+              pesoBruto: calculatedBruto,
+              pesoBrutoStr,
+              rawValue: String(row.filter(c => String(c || '').trim() !== '').join(' | ')),
+              hasData: true,
+              dataEmissao: rowDataEmissao,
+              numero: rowNumero,
+            })
+          }
+        }
+      })
+    })
+
+    const wagonSummariesList: WagonSummary[] = Array.from(globalWagonMap.values()).map((w) => {
+      const pesoBrutoTotal = w.sumPeso + w.tara
+      const somaPesoNotaVagaoStr = w.sumPeso > 0
+        ? w.sumPeso.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 3 })
+        : '0,00'
+      const taraStr = w.tara > 0
+        ? w.tara.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 3 })
+        : '0,00'
+      const pesoBrutoTotalStr = pesoBrutoTotal > 0
+        ? pesoBrutoTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 3 })
+        : '0,00'
+      const linhas = w.rows.length <= 8
+        ? `Linhas ${w.rows.join(', ')}`
+        : `Linhas ${w.rows.slice(0, 8).join(', ')}... (+${w.rows.length - 8})`
+
+      return {
+        vagao: w.vagao,
+        sheetName: w.sheetName,
+        qtdNotas: w.count,
+        somaPesoNotaVagao: w.sumPeso,
+        somaPesoNotaVagaoStr,
+        tara: w.tara,
+        taraStr,
+        pesoBrutoTotal,
+        pesoBrutoTotalStr,
+        linhas,
+      }
+    })
+
+    setAvailableExcelColumns(Array.from(allColsSet))
+    setExcelData({
+      fileName,
+      totalRows,
+      keysMap,
+      allKeysList,
+      allRowsList,
+      sheets: workbook.SheetNames,
+      wagonSummaries: wagonSummariesList,
+    })
+  }
+
+  const parseExcelForKeys = async (file: File) => {
+    setIsExcelLoading(true)
+    try {
+      const arrayBuffer = await file.arrayBuffer()
+      const workbook = XLSX.read(arrayBuffer, { type: 'array' })
+      setRawWorkbook(workbook)
+      setExcelFileName(file.name)
+      processExcelWorkbook(workbook, file.name, selectedExcelWeightCol)
+    } catch (err) {
+      console.error('Erro ao ler planilha Excel:', err)
+      alert('Falha ao ler o arquivo Excel. Verifique se o arquivo está no formato correto (.xlsx, .xls ou .csv).')
+    } finally {
+      setIsExcelLoading(false)
+    }
+  }
+
+  const handleExcelWeightColChange = (newCol: string) => {
+    setSelectedExcelWeightCol(newCol)
+    if (rawWorkbook) {
+      processExcelWorkbook(rawWorkbook, excelFileName, newCol)
+    }
+  }
+
+  const handleExcelInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      parseExcelForKeys(e.target.files[0])
+    }
+  }
+
+  const handleExcelDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const file = e.dataTransfer.files[0]
+      if (file.name.match(/\.(xlsx|xls|csv)$/i)) {
+        parseExcelForKeys(file)
+      } else {
+        alert('Por favor, envie um arquivo Excel (.xlsx, .xls) ou CSV.')
+      }
+    }
+  }
+
+  const handleRemoveExcel = () => {
+    setExcelData(null)
+    setRawWorkbook(null)
+    setExcelFileName('')
+    setAvailableExcelColumns([])
+    setSelectedExcelWeightCol('auto')
+    setExcelFilter('all')
+    setExcelSearchQuery('')
+    if (excelInputRef.current) {
+      excelInputRef.current.value = ''
+    }
+  }
+
+  React.useEffect(() => {
+    if (sharedExcelFile) {
+      void parseExcelForKeys(sharedExcelFile)
+    }
+  }, [sharedExcelFile])
+
+  const validFiles = files.filter(f => f.nfeData !== null)
+
+  const getNormalizedKey = (f: ProcessedFile): string => {
+    return f.nfeData?.chaveAcesso || ''
+  }
+
+  const getExcelMatchInfo = (key: string): ExcelMatchInfo | null => {
+    if (!excelData || !key) return null
+    if (excelData.keysMap.has(key)) {
+      return excelData.keysMap.get(key)!
+    }
+    if (key.length === 43 && excelData.keysMap.has('0' + key)) {
+      return excelData.keysMap.get('0' + key)!
+    }
+    if (key.length === 44 && key.startsWith('0') && excelData.keysMap.has(key.substring(1))) {
+      return excelData.keysMap.get(key.substring(1))!
+    }
+    return null
+  }
+
+  const matchedResults = validFiles.filter((f) => {
+    const key = getNormalizedKey(f)
+    return !!getExcelMatchInfo(key)
+  })
+
+  const unmatchedResults = validFiles.filter((f) => {
+    const key = getNormalizedKey(f)
+    return !getExcelMatchInfo(key)
+  })
+
+  const matchedExcelKeysSet = new Set<string>()
+
+  validFiles.forEach((f) => {
+    const key = getNormalizedKey(f)
+    if (!key) return
+    const matchInfo = getExcelMatchInfo(key)
+    if (matchInfo && excelData) {
+      for (const [eKey, info] of excelData.keysMap.entries()) {
+        if (
+          info === matchInfo ||
+          eKey === key ||
+          (eKey.length === 43 && '0' + eKey === key) ||
+          (key.length === 43 && '0' + key === eKey)
+        ) {
+          matchedExcelKeysSet.add(eKey)
+        }
+      }
+    }
+  })
+
+  const excelRowsWithoutFiles = excelData
+    ? excelData.allRowsList.filter((r) => {
+        if (r.key) {
+          return !matchedExcelKeysSet.has(r.key) && !matchedExcelKeysSet.has('0' + r.key) && !(r.key.startsWith('0') && matchedExcelKeysSet.has(r.key.substring(1)))
+        }
+        return true
+      })
+    : []
+
+  const excelKeysWithoutFiles = excelData
+    ? excelData.allKeysList.filter((k) => !matchedExcelKeysSet.has(k))
+    : []
+
+  const filteredResults = validFiles.filter((f) => {
+    const key = getNormalizedKey(f)
+    const matchInfo = getExcelMatchInfo(key)
+    const isMatched = !!matchInfo
+
+    if (excelFilter === 'matched' && !isMatched) return false
+    if (excelFilter === 'unmatched' && isMatched) return false
+    if (excelFilter === 'excel_only') return false
+
+    if (excelFilter === 'weight_divergent') {
+      const qtd = getFileQuantidade(f)
+      const vWeight = confrontWeights(matchInfo, qtd)
+      if (vWeight.status !== 'DIVERGENTE') return false
+    }
+
+    if (excelSearchQuery.trim().length > 0) {
+      const query = excelSearchQuery.toLowerCase()
+      const fileNameMatches = f.fileName.toLowerCase().includes(query)
+      const keyMatches = key.includes(query)
+      const nNFMatches = String(f.nfeData?.numero || '').includes(query)
+      const emitMatches = String(f.nfeData?.emitente?.nome || '').toLowerCase().includes(query)
+      const destMatches = String(f.nfeData?.destinatario?.nome || '').toLowerCase().includes(query)
+      return fileNameMatches || keyMatches || nNFMatches || emitMatches || destMatches
+    }
+
+    return true
+  })
+
+  // Helper para criar e formatar largura das colunas das abas do Excel
+  const createFormattedWorksheet = (rows: any[]) => {
+    const rowsWithContracts = rows.map((row) => {
+      const recipientCnpjKey = Object.keys(row).find((key) =>
+        /destinat[aá]rio.*cnpj|cnpj.*destinat[aá]rio/i.test(key)
+      )
+      const senderCnpjKey = Object.keys(row).find((key) =>
+        /emitente.*cnpj|cnpj.*emitente/i.test(key)
+      )
+      return {
+        ...row,
+        ...(recipientCnpjKey
+          ? {
+            Nomenclatura: getDestinatarioNomenclatureByCnpj(String(row[recipientCnpjKey] ?? '')) || '-',
+            Contrato: getDestinatarioContractByCnpj(String(row[recipientCnpjKey] ?? '')) || '-',
+          }
+          : {}),
+        ...(senderCnpjKey
+          ? {
+              'Nomenclatura Remetente': getRemetenteNomenclatureByCnpj(String(row[senderCnpjKey] ?? '')) || '-',
+            }
+          : {}),
+      }
+    })
+    const ws = XLSX.utils.json_to_sheet(rowsWithContracts.length > 0 ? rowsWithContracts : [{ Mensagem: 'Nenhum registro encontrado nesta categoria' }])
+    if (rowsWithContracts.length > 0) {
+      const maxLenMap: number[] = []
+      rowsWithContracts.forEach((row) => {
+        Object.keys(row).forEach((colKey, colIdx) => {
+          const valStr = String(row[colKey] ?? '')
+          maxLenMap[colIdx] = Math.max(maxLenMap[colIdx] || 0, valStr.length, colKey.length)
+        })
+      })
+      ws['!cols'] = maxLenMap.map((len) => ({ wch: Math.min(Math.max(len + 3, 12), 65) }))
+    }
+    return ws
+  }
+
+  // Helper para converter/normalizar valores de peso para KG (multiplica por 1000 se o valor estiver em Toneladas, ex: < 1000)
+  const normalizeWeightKg = (rawVal: any): number | string => {
+    if (rawVal === undefined || rawVal === null || String(rawVal).trim() === '') return ''
+    const num = parseBRFloat(rawVal)
+    if (isNaN(num) || num === 0) return rawVal
+
+    // Se o valor for menor que 1000 (ex: 45.5, 78.12, 120.5 T), significa que está em toneladas e deve ser multiplicado por 1000
+    // Se o valor já for >= 1000 (ex: 45500, 78120, 120500 KG), já está multiplicado por 1000 e não deve multiplicar novamente
+    if (Math.abs(num) < 1000) {
+      return Math.round(num * 1000 * 1000) / 1000
+    }
+    return Math.round(num * 1000) / 1000
+  }
+
+  // Helper para extrair as linhas da "Planilha de Digitação" exatamente na sequência original
+  const extractDigitacaoRows = (): any[] => {
+    if (!rawWorkbook) return []
+
+    // Mapa auxiliar com os dados das NF-es carregadas indexadas por chave e número
+    const nfeMap = new Map<string, ProcessedFile>()
+    validFiles.forEach((f) => {
+      const key = getNormalizedKey(f)
+      if (key) {
+        nfeMap.set(key, f)
+        if (key.length === 44 && key.startsWith('0')) {
+          nfeMap.set(key.substring(1), f)
+        }
+      }
+      if (f.nfeData?.numero) {
+        nfeMap.set(`NUM_${f.nfeData.numero}`, f)
+      }
+    })
+
+    // Mapeamento e consolidação de CT-es carregados para extração e validação do Transbordo (Expedidor)
+    const cteByVagaoMap = new Map<string, CteData>()
+    const cteByNumVagaoMap = new Map<string, CteData>()
+    const cteByChaveNfeMap = new Map<string, CteData>()
+    const cteByNumNfeMap = new Map<string, CteData>()
+
+    const transbordoCnpjsSet = new Set<string>()
+    let predominantExpedidorCnpj = ''
+    let predominantExpedidorNome = ''
+    let predominantExpedidorMun = ''
+
+    cteList.forEach((cte) => {
+      const cnpj = cte.expedidor.cnpjCpfFormatado || cte.expedidor.cnpjCpf || cte.expedidor.cnpjApenasDigitos
+      if (cnpj) {
+        transbordoCnpjsSet.add(cnpj)
+        if (!predominantExpedidorCnpj) {
+          predominantExpedidorCnpj = cnpj
+          predominantExpedidorNome = cte.expedidor.nome || ''
+          predominantExpedidorMun = cte.expedidor.municipio || ''
+        }
+      }
+
+      cte.vagoes.forEach((v) => {
+        if (v.vagaoNormalizado) {
+          cteByVagaoMap.set(v.vagaoNormalizado, cte)
+        }
+        if (v.numeroApenas) {
+          cteByNumVagaoMap.set(v.numeroApenas, cte)
+        }
+        if (v.numero) {
+          const cleanV = v.numero.replace(/[^A-Za-z0-9]/g, '').toUpperCase()
+          cteByVagaoMap.set(cleanV, cte)
+        }
+      })
+      cte.documentosOriginarios.forEach((doc) => {
+        if (doc.chaveNfe) {
+          cteByChaveNfeMap.set(doc.chaveNfe, cte)
+        }
+        if (doc.numeroNfe) {
+          cteByNumNfeMap.set(doc.numeroNfe, cte)
+          cteByNumNfeMap.set(doc.numeroNfe.replace(/^0+/, ''), cte)
+        }
+      })
+    })
+
+    const uniqueTransbordoCnpjs = Array.from(transbordoCnpjsSet)
+    const isSingleTransbordo = uniqueTransbordoCnpjs.length === 1
+    const globalTransbordoCnpj = isSingleTransbordo ? uniqueTransbordoCnpjs[0] : (predominantExpedidorCnpj || '')
+
+    const digitacaoRows: any[] = []
+
+    rawWorkbook.SheetNames.forEach((sheetName) => {
+      const worksheet = rawWorkbook.Sheets[sheetName]
+      if (!worksheet) return
+      const sheetJson: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: false, defval: '' })
+      if (!sheetJson || sheetJson.length === 0) return
+
+      let headerRowIdx = -1
+      const colMap: Record<string, number> = {}
+
+      for (let r = 0; r < Math.min(sheetJson.length, 35); r++) {
+        const row = sheetJson[r]
+        if (!row || !Array.isArray(row)) continue
+        const upperCells = row.map((c) => String(c || '').trim().toUpperCase())
+
+        const isHeader = upperCells.some((c) =>
+          c.includes('VAGAO') ||
+          c.includes('VAGÃO') ||
+          c.includes('SERIE') ||
+          c.includes('BRUTO') ||
+          c.includes('TARA') ||
+          c.includes('CHAVE') ||
+          c.includes('PESO') ||
+          c.includes('EMISSAO') ||
+          c.includes('EMISSÃO')
+        )
+
+        if (isHeader) {
+          headerRowIdx = r
+          upperCells.forEach((c, idx) => {
+            if (!c) return
+            const norm = c.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Z0-9_]/g, '_')
+            colMap[c] = idx
+            colMap[norm] = idx
+          })
+          break
+        }
+      }
+
+      if (headerRowIdx === -1) {
+        headerRowIdx = 0
+      }
+
+      const findColIdx = (candidates: string[]) => {
+        for (const cand of candidates) {
+          const upper = cand.toUpperCase()
+          const norm = upper.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Z0-9_]/g, '_')
+          for (const k of Object.keys(colMap)) {
+            if (k === upper || k === norm || k.includes(upper) || k.includes(norm)) {
+              return colMap[k]
+            }
+          }
+        }
+        return -1
+      }
+
+      const serieVagaoCol = findColIdx(['SERIE_VAGAO', 'SERIE VAGAO', 'SERIE_VAGÃO', 'SERIE VAGÃO', 'SERIE', 'SERIEVAGAO'])
+      const vagaoCol = findColIdx(['VAGAO', 'VAGÃO', 'NUM_VAGAO', 'NUMERO_VAGAO', 'NR_VAGAO', 'N_VAGAO', 'VAG'])
+      const brutoCol = findColIdx(['BRUTO', 'PESO_BRUTO', 'PESO BRUTO', 'PESOBRUTO', 'BRUTO(KG)', 'BRUTO (KG)', 'BRUTO (T)', 'BRUTO(T)'])
+      const taraCol = findColIdx(['TARA', 'TARA_VAGAO', 'TARA VAGAO', 'TARA_VAGÃO', 'TARA(KG)', 'TARA (KG)', 'TARA (T)', 'TARA(T)'])
+      const dataEmissaoCol = findColIdx(['DATA_EMISSAO', 'DATA EMISSAO', 'DATA_EMISSÃO', 'DATA EMISSÃO', 'DATA_DE_EMISSAO', 'DATA DE EMISSAO', 'DHEMI', 'DEMI', 'DATA'])
+      const pesoSelecionadoCol = findColIdx(['PESO_SELECIONADO', 'PESO SELECIONADO', 'PESO_LIQUIDO', 'PESO LIQUIDO', 'PESO_LÍQUIDO', 'PESO LÍQUIDO', 'PESOLIQUIDO', 'PESO_LIQ', 'PESO LIQ', 'QTD_NOTA', 'QUANTIDADE'])
+      const pesoNotaVagaoCol = findColIdx(['PESO_NOTA_VAGAO', 'PESO NOTA VAGAO', 'PESO_NOTA_VAGÃO', 'PESO NOTA VAGÃO', 'PESO_VAGAO', 'PESO VAGAO', 'PESO_RATEADO'])
+      const cnpjEmitenteCol = findColIdx(['CNPJ_EMITENTE', 'CNPJ EMITENTE', 'EMITENTE_CNPJ', 'CNPJ_EMIT', 'EMIT_CNPJ', 'EMITENTE'])
+      const cnpjDestinatarioCol = findColIdx(['CNPJ_DESTINATARIO', 'CNPJ DESTINATARIO', 'DESTINATARIO_CNPJ', 'CNPJ_DEST', 'DEST_CNPJ', 'DESTINATARIO'])
+      const numeroCol = findColIdx(['NUMERO', 'NÚMERO', 'Nº NOTA', 'NR_NOTA', 'NNF', 'NUM_NOTA', 'NUMERO_NOTA', 'NOTA'])
+      const chaveCol = findColIdx(['CHAVE', 'CHAVE_DE_ACESSO', 'CHAVE DE ACESSO', 'CHAVE_ACESSO', 'NFE_CHAVE', 'CHAVENFE'])
+      const transbordoExcelCol = findColIdx(['TRANSBORDO DO CTE', 'TRANSBORDO_DO_CTE', 'TRANSBORDO', 'CNPJ_TRANSBORDO', 'CNPJ TRANSBORDO', 'EXPEDIDOR', 'CNPJ_EXPEDIDOR'])
+
+      // 1. Passo: Mapear e acumular todos os rateios (PESO_NOTA_VAGAO) e capturar a TARA ÚNICA de cada vagão
+      const sheetWagonMap = new Map<string, { sumPesoNotaVagao: number; sumPesoSel: number; tara: number; bruto: number; count: number }>()
+
+      for (let r = headerRowIdx + 1; r < sheetJson.length; r++) {
+        const row = sheetJson[r]
+        if (!row || !Array.isArray(row)) continue
+        const hasAnyValue = row.some((c) => String(c !== undefined && c !== null ? c : '').trim() !== '')
+        if (!hasAnyValue) continue
+
+        const serieRaw = serieVagaoCol !== -1 && row[serieVagaoCol] !== undefined && row[serieVagaoCol] !== null ? String(row[serieVagaoCol]).trim() : ''
+        const vagaoRaw = vagaoCol !== -1 && row[vagaoCol] !== undefined && row[vagaoCol] !== null ? String(row[vagaoCol]).trim() : ''
+        let vId = ''
+        if (serieRaw && vagaoRaw) {
+          vId = vagaoRaw.toUpperCase().startsWith(serieRaw.toUpperCase()) ? vagaoRaw : `${serieRaw}${vagaoRaw}`
+        } else {
+          vId = serieRaw || vagaoRaw || ''
+        }
+        const vNorm = vId.replace(/[^A-Za-z0-9]/g, '').toUpperCase()
+        if (!vNorm) continue
+
+        const taraVal = taraCol !== -1 ? normalizeWeightKg(row[taraCol]) : 0
+        const taraNum = typeof taraVal === 'number' ? taraVal : (taraVal ? parseBRFloat(taraVal) : 0)
+
+        const pesoNotaVal = pesoNotaVagaoCol !== -1 ? normalizeWeightKg(row[pesoNotaVagaoCol]) : 0
+        const pesoNotaNum = typeof pesoNotaVal === 'number' ? pesoNotaVal : (pesoNotaVal ? parseBRFloat(pesoNotaVal) : 0)
+
+        const pesoSelVal = pesoSelecionadoCol !== -1 ? normalizeWeightKg(row[pesoSelecionadoCol]) : 0
+        const pesoSelNum = typeof pesoSelVal === 'number' ? pesoSelVal : (pesoSelVal ? parseBRFloat(pesoSelVal) : 0)
+
+        const brutoVal = brutoCol !== -1 ? normalizeWeightKg(row[brutoCol]) : 0
+        const brutoNum = typeof brutoVal === 'number' ? brutoVal : (brutoVal ? parseBRFloat(brutoVal) : 0)
+
+        const existing = sheetWagonMap.get(vNorm) || { sumPesoNotaVagao: 0, sumPesoSel: 0, tara: 0, bruto: 0, count: 0 }
+        if (pesoNotaNum > 0) existing.sumPesoNotaVagao += pesoNotaNum
+        if (pesoSelNum > 0) existing.sumPesoSel += pesoSelNum
+        if (taraNum > 0 && (existing.tara === 0 || taraNum > existing.tara)) existing.tara = taraNum
+        if (brutoNum > 0 && (existing.bruto === 0 || brutoNum > existing.bruto)) existing.bruto = brutoNum
+        existing.count += 1
+        sheetWagonMap.set(vNorm, existing)
+      }
+
+      // 2. Passo: Percorrer todas as linhas na sequência exata montando a digitação com PESO BRUTO REAL DO VAGÃO
+      for (let r = headerRowIdx + 1; r < sheetJson.length; r++) {
+        const row = sheetJson[r]
+        if (!row || !Array.isArray(row)) continue
+
+        const hasAnyValue = row.some((c) => String(c !== undefined && c !== null ? c : '').trim() !== '')
+        if (!hasAnyValue) continue
+
+        // Identificar e extrair chave de acesso limpa com 44 dígitos (extraindo letras como NFe...)
+        let rowKey = ''
+        if (chaveCol !== -1 && row[chaveCol] !== undefined && row[chaveCol] !== null) {
+          const rawK = String(row[chaveCol]).replace(/\D/g, '')
+          if (rawK.length >= 44) {
+            rowKey = rawK.substring(rawK.length - 44)
+          } else if (rawK.length > 0) {
+            rowKey = rawK
+          }
+        }
+        if (!rowKey || rowKey.length < 44) {
+          for (const cell of row) {
+            const rawDigits = String(cell || '').replace(/\D/g, '')
+            if (rawDigits.length >= 44) {
+              rowKey = rawDigits.substring(rawDigits.length - 44)
+              break
+            }
+          }
+        }
+
+        const linkedNfe = rowKey ? nfeMap.get(rowKey) : null
+
+        // 1. vagao: concatenação dos valores SERIE_VAGAO e VAGAO
+        const serieRaw = serieVagaoCol !== -1 && row[serieVagaoCol] !== undefined && row[serieVagaoCol] !== null ? String(row[serieVagaoCol]).trim() : ''
+        const vagaoRaw = vagaoCol !== -1 && row[vagaoCol] !== undefined && row[vagaoCol] !== null ? String(row[vagaoCol]).trim() : ''
+
+        let vagaoFinal = ''
+        if (serieRaw && vagaoRaw) {
+          if (vagaoRaw.toUpperCase().startsWith(serieRaw.toUpperCase())) {
+            vagaoFinal = vagaoRaw
+          } else {
+            vagaoFinal = `${serieRaw}${vagaoRaw}`
+          }
+        } else {
+          vagaoFinal = serieRaw || vagaoRaw || ''
+        }
+
+        const vNorm = vagaoFinal.replace(/[^A-Za-z0-9]/g, '').toUpperCase()
+        const wagonInfo = vNorm ? sheetWagonMap.get(vNorm) : null
+
+        // 3. TARA: usar a tara única do vagão (se identificada) ou a da linha
+        const taraFinalRaw = taraCol !== -1 ? normalizeWeightKg(row[taraCol]) : ''
+        const taraNumRow = typeof taraFinalRaw === 'number' ? taraFinalRaw : (taraFinalRaw ? parseBRFloat(taraFinalRaw) : 0)
+        const taraFinalNum = (wagonInfo && wagonInfo.tara > 0) ? wagonInfo.tara : taraNumRow
+        const taraFinal = taraFinalNum > 0 ? taraFinalNum : taraFinalRaw
+
+        // 5. PESO_SELECIONADO: multiplicar por 1000 se não estiver em KG
+        const pesoSelecionadoFinal = pesoSelecionadoCol !== -1 ? normalizeWeightKg(row[pesoSelecionadoCol]) : ''
+
+        // 6. PESO_NOTA_VAGAO: multiplicar por 1000 se não estiver em KG
+        const pesoNotaVagaoFinal = pesoNotaVagaoCol !== -1 ? normalizeWeightKg(row[pesoNotaVagaoCol]) : ''
+
+        // 2. BRUTO: O BRUTO DEVE SER IGUAL À SOMA DE TODOS OS RATEIOS DA COLUNA PESO_NOTA_VAGAO + A TARA ÚNICA DO VAGÃO
+        let brutoFinal: number | string = ''
+        const effWagonSumPeso = (wagonInfo && wagonInfo.sumPesoNotaVagao > 0)
+          ? wagonInfo.sumPesoNotaVagao
+          : (wagonInfo && wagonInfo.sumPesoSel > 0 ? wagonInfo.sumPesoSel : 0)
+
+        const pesoNotaNumRow = typeof pesoNotaVagaoFinal === 'number' ? pesoNotaVagaoFinal : (pesoNotaVagaoFinal ? parseBRFloat(pesoNotaVagaoFinal) : 0)
+
+        if (wagonInfo && (wagonInfo.tara > 0 || effWagonSumPeso > 0)) {
+          brutoFinal = Math.round((wagonInfo.tara + effWagonSumPeso) * 1000) / 1000
+        } else if (taraNumRow > 0 || pesoNotaNumRow > 0) {
+          brutoFinal = Math.round((taraNumRow + pesoNotaNumRow) * 1000) / 1000
+        } else if (wagonInfo && wagonInfo.bruto > 0) {
+          brutoFinal = wagonInfo.bruto
+        } else if (brutoCol !== -1 && row[brutoCol] !== undefined && row[brutoCol] !== null && String(row[brutoCol]).trim() !== '') {
+          brutoFinal = normalizeWeightKg(row[brutoCol])
+        }
+
+        // 4. data_emissao: extrair somente a data (ex: "18/08/2026 15:02:12" -> "18/08/2026")
+        let dataEmissaoFinal = ''
+        let rawData = dataEmissaoCol !== -1 && row[dataEmissaoCol] !== undefined && row[dataEmissaoCol] !== null
+          ? String(row[dataEmissaoCol]).trim()
+          : ''
+
+        if (!rawData && linkedNfe?.nfeData?.dataEmissao) {
+          rawData = String(linkedNfe.nfeData.dataEmissao).trim()
+        }
+
+        if (rawData) {
+          if (rawData.includes(' ')) {
+            dataEmissaoFinal = rawData.split(' ')[0].trim()
+          } else if (rawData.includes('T')) {
+            const datePart = rawData.split('T')[0].trim()
+            if (datePart.includes('-')) {
+              const [y, m, d] = datePart.split('-')
+              dataEmissaoFinal = `${d}/${m}/${y}`
+            } else {
+              dataEmissaoFinal = datePart
+            }
+          } else {
+            dataEmissaoFinal = rawData
+          }
+        }
+
+        // 7. CNPJ_EMITENTE
+        let cnpjEmitenteFinal = ''
+        if (cnpjEmitenteCol !== -1 && row[cnpjEmitenteCol] !== undefined && row[cnpjEmitenteCol] !== null && String(row[cnpjEmitenteCol]).trim() !== '') {
+          cnpjEmitenteFinal = String(row[cnpjEmitenteCol]).trim()
+        } else if (linkedNfe?.nfeData?.emitente?.cnpj) {
+          cnpjEmitenteFinal = String(linkedNfe.nfeData.emitente.cnpj).trim()
+        }
+
+        // 8. CNPJ_DESTINATARIO
+        let cnpjDestinatarioFinal = ''
+        if (cnpjDestinatarioCol !== -1 && row[cnpjDestinatarioCol] !== undefined && row[cnpjDestinatarioCol] !== null && String(row[cnpjDestinatarioCol]).trim() !== '') {
+          cnpjDestinatarioFinal = String(row[cnpjDestinatarioCol]).trim()
+        } else if (linkedNfe?.nfeData?.destinatario?.cpfCnpj) {
+          cnpjDestinatarioFinal = String(linkedNfe.nfeData.destinatario.cpfCnpj).trim()
+        }
+
+        // 9. NUMERO
+        let numeroFinal: any = ''
+        if (numeroCol !== -1 && row[numeroCol] !== undefined && row[numeroCol] !== null && String(row[numeroCol]).trim() !== '') {
+          numeroFinal = String(row[numeroCol]).trim()
+        } else if (linkedNfe?.nfeData?.numero) {
+          numeroFinal = String(linkedNfe.nfeData.numero).trim()
+        }
+
+        // 10. CHAVE: extrair os 44 dígitos numéricos puros (limpando "NFe", prefixos e pontuações)
+        let chaveFinal = ''
+        if (rowKey && rowKey.length === 44) {
+          chaveFinal = rowKey
+        } else if (linkedNfe) {
+          const keyFromNfe = getNormalizedKey(linkedNfe)
+          if (keyFromNfe && keyFromNfe.length === 44) {
+            chaveFinal = keyFromNfe
+          }
+        }
+        if (!chaveFinal && chaveCol !== -1 && row[chaveCol] !== undefined && row[chaveCol] !== null) {
+          const rawDigits = String(row[chaveCol]).replace(/\D/g, '')
+          if (rawDigits.length >= 44) {
+            chaveFinal = rawDigits.substring(rawDigits.length - 44)
+          } else {
+            chaveFinal = rawDigits
+          }
+        }
+
+        // 11. transbordo do CTe: extrair do campo do expedidor do CT-e correspondente a este vagão/nota
+        const vagaoNorm = normalizarVagao(vagaoFinal)
+        const vagaoNumApenas = extrairApenasDigitosVagao(vagaoFinal)
+        const cleanVagaoUpper = vagaoFinal.replace(/[^A-Za-z0-9]/g, '').toUpperCase()
+
+        let matchedCte: CteData | undefined = undefined
+        if (cleanVagaoUpper && cteByVagaoMap.has(cleanVagaoUpper)) {
+          matchedCte = cteByVagaoMap.get(cleanVagaoUpper)
+        } else if (vagaoNorm && cteByVagaoMap.has(vagaoNorm)) {
+          matchedCte = cteByVagaoMap.get(vagaoNorm)
+        } else if (vagaoNumApenas && cteByNumVagaoMap.has(vagaoNumApenas)) {
+          matchedCte = cteByNumVagaoMap.get(vagaoNumApenas)
+        } else if (chaveFinal && cteByChaveNfeMap.has(chaveFinal)) {
+          matchedCte = cteByChaveNfeMap.get(chaveFinal)
+        } else if (numeroFinal && cteByNumNfeMap.has(String(numeroFinal).replace(/^0+/, ''))) {
+          matchedCte = cteByNumNfeMap.get(String(numeroFinal).replace(/^0+/, ''))
+        }
+
+        let transbordoCteFinal = ''
+        if (isSingleTransbordo && globalTransbordoCnpj) {
+          // Se todos os CT-es são do mesmo transbordo (ex: Pradópolis, Pederneiras), aplica o CNPJ a todas as linhas diretamente
+          transbordoCteFinal = globalTransbordoCnpj
+        } else if (matchedCte?.expedidor) {
+          transbordoCteFinal =
+            matchedCte.expedidor.cnpjCpfFormatado ||
+            matchedCte.expedidor.cnpjCpf ||
+            matchedCte.expedidor.cnpjApenasDigitos ||
+            ''
+        } else if (globalTransbordoCnpj) {
+          transbordoCteFinal = globalTransbordoCnpj
+        } else if (transbordoExcelCol !== -1 && row[transbordoExcelCol] !== undefined && row[transbordoExcelCol] !== null) {
+          transbordoCteFinal = String(row[transbordoExcelCol]).trim()
+        }
+
+        digitacaoRows.push({
+          'vagao': vagaoFinal,
+          'BRUTO': brutoFinal,
+          'TARA': taraFinal,
+          'data_emissao': dataEmissaoFinal,
+          'PESO_SELECIONADO': pesoSelecionadoFinal,
+          'PESO_NOTA_VAGAO': pesoNotaVagaoFinal,
+          'CNPJ_EMITENTE': cnpjEmitenteFinal,
+          'CNPJ_DESTINATARIO': cnpjDestinatarioFinal,
+          'NUMERO': numeroFinal,
+          'CHAVE': chaveFinal,
+          'transbordo do CTe': transbordoCteFinal,
+        })
+      }
+    })
+
+    return digitacaoRows
+  }
+
+  // Exportar exclusivamente a Planilha de Digitação
+  const handleExportDigitacaoOnly = () => {
+    if (!rawWorkbook) {
+      alert('Carregue uma planilha Excel de origem para gerar a Planilha de Digitação.')
+      return
+    }
+
+    const digitacaoRows = extractDigitacaoRows()
+    if (digitacaoRows.length === 0) {
+      alert('Nenhum dado encontrado na planilha de origem para gerar a digitação.')
+      return
+    }
+
+    const wb = XLSX.utils.book_new()
+    const wsDigitacao = createFormattedWorksheet(digitacaoRows)
+    XLSX.utils.book_append_sheet(wb, wsDigitacao, 'Planilha de Digitação')
+    XLSX.writeFile(wb, `planilha_digitacao_${new Date().toISOString().slice(0, 10)}.xlsx`)
+  }
+
+  // Exportar Relatório Consolidado de Conferência em Excel com Múltiplas Abas (Formato Original Idêntico)
+  const handleExportReconciliationReport = async () => {
+    if (!excelData && validFiles.length === 0) {
+      alert('Carregue notas e/ou uma planilha Excel para gerar o relatório de conferência.')
+      return
+    }
+
+    setIsExportingExcelWithAI(true)
+    let currentAuditMap: Record<string, WeightAuditItemResult> = { ...auditResultsMap }
+
+    try {
+      // 1. Identificar todas as notas que vieram de PDF
+      const pdfFiles = validFiles.filter(
+        (f) => f.isPdf || f.fileType === 'pdf' || f.fileName.toLowerCase().endsWith('.pdf') || !f.xmlContent?.startsWith('<?xml')
+      )
+
+      // 2. Se houver notas de PDF, garantir a conferência da IA para 100% delas
+      if (pdfFiles.length > 0) {
+        const itemsToAudit = pdfFiles.map((f) => {
+          const key = getNormalizedKey(f)
+          const matchInfo = getExcelMatchInfo(key)
+          const initialQtd = getFileQuantidade(f)
+          const vWeight = confrontWeights(matchInfo, initialQtd)
+          return {
+            id: key || f.fileName,
+            fileName: f.fileName,
+            chave: key,
+            numero: f.nfeData?.numero,
+            serie: f.nfeData?.serie,
+            pesoLido: initialQtd,
+            pesoExcel: vWeight.pesoExcel || undefined,
+            snippet: f.rawSnippet || f.parsedData?.rawSnippet || '',
+            xmlContent: f.xmlContent,
+            isPdf: true,
+          }
+        })
+
+        currentAuditMap = await conferirQuantidadesNotasPdfComIA(itemsToAudit, currentAuditMap)
+        setAuditResultsMap(currentAuditMap)
+        if (onUpdateAuditMap) {
+          onUpdateAuditMap(currentAuditMap)
+        }
+      }
+
+      const wb = XLSX.utils.book_new()
+
+      // 1. Resumo Geral
+      const totalFilesCount = validFiles.length
+      const matchedCount = matchedResults.length
+      const unmatchedCount = unmatchedResults.length
+      const totalExcelKeys = excelData ? excelData.allKeysList.length : 0
+      const missingFilesCount = excelKeysWithoutFiles.length
+      const matchPercentage = totalFilesCount > 0 ? Math.round((matchedCount / totalFilesCount) * 100) : 0
+
+      const weightDivergentCount = validFiles.filter((f) => {
+        const key = getNormalizedKey(f)
+        const matchInfo = getExcelMatchInfo(key)
+        const isPdf = f.isPdf || f.fileType === 'pdf' || f.fileName.toLowerCase().endsWith('.pdf') || !f.xmlContent?.startsWith('<?xml')
+        const confIA = isPdf ? obterQuantidadeConferidaIA(key || f.fileName, getFileQuantidade(f), currentAuditMap, overrideWeightsMap, f.fileName) : null
+        const qtd = (isPdf && confIA) ? confIA.quantidade : getFileQuantidade(f)
+        const vWeight = confrontWeights(matchInfo, qtd)
+        return vWeight.status === 'DIVERGENTE'
+      }).length
+
+      const weightMatchedCount = validFiles.filter((f) => {
+        const key = getNormalizedKey(f)
+        const matchInfo = getExcelMatchInfo(key)
+        const isPdf = f.isPdf || f.fileType === 'pdf' || f.fileName.toLowerCase().endsWith('.pdf') || !f.xmlContent?.startsWith('<?xml')
+        const confIA = isPdf ? obterQuantidadeConferidaIA(key || f.fileName, getFileQuantidade(f), currentAuditMap, overrideWeightsMap, f.fileName) : null
+        const qtd = (isPdf && confIA) ? confIA.quantidade : getFileQuantidade(f)
+        const vWeight = confrontWeights(matchInfo, qtd)
+        return vWeight.status === 'CONFERE'
+      }).length
+
+    const summaryRows = [
+      { 'Métrica / Indicador': 'Data e Hora da Conferência', 'Valor / Detalhe': new Date().toLocaleString('pt-BR') },
+      { 'Métrica / Indicador': 'Planilha Excel de Origem', 'Valor / Detalhe': excelData?.fileName || excelFileName || 'Nenhuma planilha informada' },
+      { 'Métrica / Indicador': 'Modo de Operação', 'Valor / Detalhe': 'XML para PDF (DANFE)' },
+      { 'Métrica / Indicador': 'Total de Arquivos Importados (PDF/XML)', 'Valor / Detalhe': totalFilesCount },
+      { 'Métrica / Indicador': 'Notas ENCONTRADAS na Planilha Excel', 'Valor / Detalhe': matchedCount },
+      { 'Métrica / Indicador': 'Notas AUSENTES na Planilha Excel', 'Valor / Detalhe': unmatchedCount },
+      { 'Métrica / Indicador': 'Total de Vagões Únicos Consolidados', 'Valor / Detalhe': excelData?.wagonSummaries?.length || 0 },
+      { 'Métrica / Indicador': 'Notas com PESO CONFERIDO (Excel x Nota)', 'Valor / Detalhe': weightMatchedCount },
+      { 'Métrica / Indicador': 'Notas com DIVERGÊNCIA DE PESO (Excel x Nota)', 'Valor / Detalhe': weightDivergentCount },
+      { 'Métrica / Indicador': 'Total de Chaves de Acesso na Planilha Excel', 'Valor / Detalhe': totalExcelKeys },
+      { 'Métrica / Indicador': 'Chaves no Excel Faltando Arquivo de Nota', 'Valor / Detalhe': missingFilesCount },
+      { 'Métrica / Indicador': 'Taxa de Batimento / Batimento (%)', 'Valor / Detalhe': `${matchPercentage}%` },
+    ]
+    const wsSummary = createFormattedWorksheet(summaryRows)
+    XLSX.utils.book_append_sheet(wb, wsSummary, 'Resumo Geral')
+
+    // 2. ABA PLANILHA DE DIGITAÇÃO (SEQUÊNCIA ORIGINAL COMPLETA SEM REMOVER DUPLICADAS)
+    if (rawWorkbook) {
+      const digitacaoRows = extractDigitacaoRows()
+      if (digitacaoRows.length > 0) {
+        const wsDigitacao = createFormattedWorksheet(digitacaoRows)
+        XLSX.utils.book_append_sheet(wb, wsDigitacao, 'Planilha de Digitação')
+      }
+    }
+
+    // 3. ABA CONSOLIDAÇÃO POR VAGÃO (CÁLCULO TOTAL: SOMA DE PESO_NOTA_VAGAO + TARA)
+    if (excelData && excelData.wagonSummaries && excelData.wagonSummaries.length > 0) {
+      const wagonExportRows = excelData.wagonSummaries.map((w) => ({
+        'Vagão': w.vagao,
+        'Aba / Planilha de Origem': w.sheetName,
+        'Qtd de Notas / Linhas no Vagão': w.qtdNotas,
+        'Soma Total PESO_NOTA_VAGAO (kg/t)': w.somaPesoNotaVagaoStr,
+        'Tara Única do Vagão (kg/t)': w.taraStr,
+        'PESO BRUTO TOTAL DO VAGÃO (Soma + Tara)': w.pesoBrutoTotalStr,
+        'Posição / Linhas no Excel': w.linhas,
+      }))
+      const wsWagons = createFormattedWorksheet(wagonExportRows)
+      XLSX.utils.book_append_sheet(wb, wsWagons, 'Consolidação por Vagão')
+    }
+
+    // Indexar todos os arquivos por chave e por número da NF
+    const filesByKey = new Map<string, any>()
+    const filesByNumero = new Map<string, any>()
+    files.forEach((f) => {
+      const k = getNormalizedKey(f) || (f.parsedData?.chave || '').replace(/\D/g, '') || (f.nfeData?.chaveAcesso || '').replace(/\D/g, '')
+      if (k) {
+        filesByKey.set(k, f)
+        const cleanK = k.replace(/\D/g, '')
+        if (cleanK) {
+          filesByKey.set(cleanK, f)
+          if (cleanK.length === 43) filesByKey.set('0' + cleanK, f)
+          if (cleanK.length === 44 && cleanK.startsWith('0')) filesByKey.set(cleanK.substring(1), f)
+        }
+      }
+      const num = String(f.nfeData?.numero || f.parsedData?.nNF || '').trim().replace(/^0+/, '')
+      if (num) {
+        filesByNumero.set(num, f)
+      }
+    })
+
+    // 4. ABA TOTAL DE ARQUIVOS (ORDENADOS CONFORME A ORDEM DAS LINHAS DA PLANILHA EXCEL)
+    let rowsTotalOrdered: any[] = []
+
+    if (excelData && excelData.allRowsList && excelData.allRowsList.length > 0) {
+      const matchedFilesSet = new Set<any>()
+
+      // 1. Percorrer TODAS as linhas da planilha Excel na sequência original
+      excelData.allRowsList.forEach((rowRec) => {
+        const fileMatch = rowRec.key ? filesByKey.get(rowRec.key) : null
+
+        if (fileMatch) {
+          matchedFilesSet.add(fileMatch)
+          const key = getNormalizedKey(fileMatch)
+          const matchInfo = getExcelMatchInfo(key) || {
+            row: rowRec.row,
+            rawValue: rowRec.rawValue || '',
+            sheetName: rowRec.sheetName,
+            pesoSelecionado: rowRec.pesoSelecionado,
+            pesoSelecionadoStr: rowRec.pesoSelecionadoStr,
+            pesoNotaVagao: rowRec.pesoNotaVagao,
+            pesoNotaVagaoStr: rowRec.pesoNotaVagaoStr,
+            tara: rowRec.tara,
+            taraStr: rowRec.taraStr,
+            vagao: rowRec.vagao,
+            pesoBruto: rowRec.pesoBruto,
+            pesoBrutoStr: rowRec.pesoBrutoStr,
+          }
+
+          const destCNPJ = fileMatch.nfeData?.destinatario?.cpfCnpj || ''
+          const emitCNPJ = fileMatch.nfeData?.emitente?.cnpj || ''
+          const vCNPJ = fileMatch.nfeData?.verificacaoCNPJ || verifyChaveCNPJ(key, emitCNPJ, destCNPJ)
+          const isPdf = fileMatch.isPdf || fileMatch.fileType === 'pdf' || fileMatch.fileName.toLowerCase().endsWith('.pdf') || !fileMatch.xmlContent?.startsWith('<?xml')
+          const initialQtd = getFileQuantidade(fileMatch)
+          const confIA = isPdf ? obterQuantidadeConferidaIA(key || fileMatch.fileName, initialQtd, currentAuditMap, overrideWeightsMap, fileMatch.fileName) : null
+          const qtdNota = (isPdf && confIA) ? confIA.quantidade : initialQtd
+          const vWeight = confrontWeights(matchInfo, qtdNota)
+          const itemAudit = currentAuditMap[key || fileMatch.fileName]
+          const pesoIaEncontrado = (isPdf && confIA) ? confIA.quantidade : (itemAudit?.pesoCorrigidoDoc ?? qtdNota)
+
+          const numNF = extractNumeroNF(fileMatch.nfeData?.numero || fileMatch.parsedData?.nNF, key)
+          const dtEmissao = extractDataEmissao(fileMatch.nfeData?.dataEmissao || fileMatch.parsedData?.dhEmi || fileMatch.parsedData?.dataEmissao, key)
+
+          rowsTotalOrdered.push({
+            'Posição / Linha Excel': `Linha ${rowRec.row} (${rowRec.sheetName})`,
+            'Status Conferência Excel': 'CONSTA NA PLANILHA',
+            'Vagão (Excel)': rowRec.vagao || matchInfo?.vagao || 'N/A',
+            'Chave de Acesso': key || rowRec.key || '',
+            'Número NF': numNF,
+            'Data de Emissão': dtEmissao,
+            'CNPJ na Chave': vCNPJ.chaveCnpj || 'N/I',
+            'Destinatário CNPJ': destCNPJ,
+            'Destinatário': fileMatch.nfeData?.destinatario?.nome || '',
+            'Confronto (Chave vs Destinatário)': vCNPJ.confrontoChaveXDest,
+            'Validação CNPJ': vCNPJ.statusLabel,
+            'Comprovação da Divergência / Detalhes': vCNPJ.details,
+            'Nº Nota (nNF)': numNF,
+            'Série': fileMatch.nfeData?.serie || '',
+            'Peso Selecionado (Excel)': vWeight.pesoExcelStr,
+            'Peso Nota Vagão (Excel)': rowRec.pesoNotaVagaoStr || matchInfo?.pesoNotaVagaoStr || 'N/A',
+            'Tara (Excel)': rowRec.taraStr || matchInfo?.taraStr || 'N/A',
+            'Peso Bruto do Vagão (Soma Rateios + Tara)': rowRec.pesoBrutoStr || matchInfo?.pesoBrutoStr || 'N/A',
+            'Quantidade Extraída (Nota)': qtdNota,
+            'Confronto Peso (Excel vs Nota)': vWeight.statusLabel,
+            'Diferença de Peso (Excel - Nota)': vWeight.pesoExcel !== null ? vWeight.diferenca : 'N/A',
+            'Quantidade Encontrada pela IA (Valor Real)': pesoIaEncontrado,
+            'Auditoria IA (Status / Causa)': isPdf
+              ? confIA?.status
+              : (itemAudit?.status === 'ERRO_LEITURA_SISTEMA'
+                ? 'ERRO DE LEITURA DO SISTEMA (VALOR REAL ENCONTRADO)'
+                : itemAudit?.status === 'DIVERGENCIA_REAL'
+                  ? 'DIVERGÊNCIA REAL DE PESAGEM'
+                  : itemAudit?.status === 'CONFERIDO_CORRETO'
+                    ? 'PESO CONFERIDO CORRETO'
+                    : (vWeight.status === 'DIVERGENTE' ? 'Divergência não auditada pela IA' : 'PESO CORRETO / CONFERIDO')),
+            'Explicação IA': isPdf ? confIA?.explicacao : (itemAudit?.explicacao || ''),
+            'Valor Total (R$)': fileMatch.nfeData?.impostos?.valorTotal || 0,
+            'Emitente': fileMatch.nfeData?.emitente?.nome || '',
+            'CNPJ Emitente': emitCNPJ,
+            'Nome do Arquivo': fileMatch.fileName,
+            'Tipo Documento': fileMatch.xmlContent ? 'XML' : 'PDF',
+          })
+        } else {
+          // LINHA DA PLANILHA EXCEL SEM ARQUIVO CORRESPONDENTE CARREGADO
+          const cleanKey = rowRec.key || ''
+          const cnpjFromKey = cleanKey.length === 44 ? cleanKey.substring(6, 20) : 'N/A'
+          const numFromKey = extractNumeroNF(cleanKey.length === 44 ? cleanKey.substring(25, 34) : '', cleanKey)
+          const dtFromKey = extractDataEmissao('', cleanKey)
+          const serieFromKey = cleanKey.length === 44 ? (cleanKey.substring(22, 25).replace(/^0+/, '') || 'N/A') : 'N/A'
+
+          rowsTotalOrdered.push({
+            'Posição / Linha Excel': `Linha ${rowRec.row} (${rowRec.sheetName})`,
+            'Status Conferência Excel': cleanKey ? 'NÃO ENCONTRADO NOS ARQUIVOS (CONSTA APENAS NO EXCEL)' : 'SEM CHAVE NA LINHA DO EXCEL (NÃO ENCONTRADO NOS ARQUIVOS)',
+            'Vagão (Excel)': rowRec.vagao || 'N/A',
+            'Chave de Acesso': cleanKey || 'SEM CHAVE NA LINHA',
+            'Número NF': cleanKey ? numFromKey : 'N/A',
+            'Data de Emissão': cleanKey ? dtFromKey : 'N/A',
+            'CNPJ na Chave': cnpjFromKey,
+            'Destinatário CNPJ': 'NÃO ENCONTRADO NOS ARQUIVOS',
+            'Destinatário': 'NÃO ENCONTRADO NOS ARQUIVOS',
+            'Confronto (Chave vs Destinatário)': 'NÃO ENCONTRADO NOS ARQUIVOS',
+            'Validação CNPJ': 'NÃO ENCONTRADO NOS ARQUIVOS',
+            'Comprovação da Divergência / Detalhes': 'NÃO ENCONTRADO NOS ARQUIVOS',
+            'Nº Nota (nNF)': cleanKey ? numFromKey : 'NÃO ENCONTRADO NOS ARQUIVOS',
+            'Série': serieFromKey !== 'N/A' ? serieFromKey : 'N/A',
+            'Peso Selecionado (Excel)': rowRec.pesoSelecionadoStr || 'N/A',
+            'Peso Nota Vagão (Excel)': rowRec.pesoNotaVagaoStr || 'N/A',
+            'Tara (Excel)': rowRec.taraStr || 'N/A',
+            'Peso Bruto do Vagão (Soma Rateios + Tara)': rowRec.pesoBrutoStr || 'N/A',
+            'Quantidade Extraída (Nota)': 'NÃO ENCONTRADO NOS ARQUIVOS',
+            'Confronto Peso (Excel vs Nota)': cleanKey ? 'ARQUIVO NÃO ENCONTRADO / AUSENTE' : 'SEM CHAVE / ARQUIVO AUSENTE',
+            'Diferença de Peso (Excel - Nota)': 'N/A',
+            'Quantidade Encontrada pela IA (Valor Real)': 'N/A (Sem arquivo)',
+            'Auditoria IA (Status / Causa)': cleanKey ? 'ARQUIVO NÃO CARREGADO / NOTA NÃO ENCONTRADA' : 'LINHA SEM CHAVE DE ACESSO NO EXCEL',
+            'Explicação IA': cleanKey
+              ? 'Esta linha consta na planilha Excel, porém o arquivo correspondente (PDF/XML) não foi carregado para conferência.'
+              : 'Linha presente na planilha Excel sem chave de acesso de 44 dígitos identificada.',
+            'Valor Total (R$)': 0,
+            'Emitente': 'NÃO ENCONTRADO NOS ARQUIVOS',
+            'CNPJ Emitente': 'NÃO ENCONTRADO NOS ARQUIVOS',
+            'Nome do Arquivo': 'ARQUIVO NÃO CARREGADO NO SISTEMA',
+            'Tipo Documento': 'N/A',
+          })
+        }
+      })
+
+      // 2. Adicionar arquivos carregados que NÃO constam na planilha Excel
+      validFiles.forEach((f) => {
+        if (!matchedFilesSet.has(f)) {
+          const key = getNormalizedKey(f)
+          const destCNPJ = f.nfeData?.destinatario?.cpfCnpj || ''
+          const emitCNPJ = f.nfeData?.emitente?.cnpj || ''
+          const vCNPJ = f.nfeData?.verificacaoCNPJ || verifyChaveCNPJ(key, emitCNPJ, destCNPJ)
+          const qtdNota = getFileQuantidade(f)
+          const numNF = extractNumeroNF(f.nfeData?.numero || f.parsedData?.nNF, key)
+          const dtEmissao = extractDataEmissao(f.nfeData?.dataEmissao || f.parsedData?.dhEmi || f.parsedData?.dataEmissao, key)
+
+          rowsTotalOrdered.push({
+            'Posição / Linha Excel': 'Fora da Planilha Excel',
+            'Status Conferência Excel': 'NÃO CONSTA NA PLANILHA',
+            'Vagão (Excel)': 'N/A',
+            'Chave de Acesso': key,
+            'Número NF': numNF,
+            'Data de Emissão': dtEmissao,
+            'CNPJ na Chave': vCNPJ.chaveCnpj || 'N/I',
+            'Destinatário CNPJ': destCNPJ,
+            'Destinatário': f.nfeData?.destinatario?.nome || '',
+            'Confronto (Chave vs Destinatário)': vCNPJ.confrontoChaveXDest,
+            'Validação CNPJ': vCNPJ.statusLabel,
+            'Comprovação da Divergência / Detalhes': vCNPJ.details,
+            'Nº Nota (nNF)': numNF,
+            'Série': f.nfeData?.serie || '',
+            'Peso Selecionado (Excel)': 'N/A',
+            'Peso Nota Vagão (Excel)': 'N/A',
+            'Tara (Excel)': 'N/A',
+            'Peso Bruto do Vagão (Soma Rateios + Tara)': 'N/A',
+            'Quantidade Extraída (Nota)': qtdNota,
+            'Confronto Peso (Excel vs Nota)': 'NÃO CONSTA NA PLANILHA',
+            'Diferença de Peso (Excel - Nota)': 'N/A',
+            'Quantidade Encontrada pela IA (Valor Real)': 'N/A',
+            'Auditoria IA (Status / Causa)': 'ARQUIVO CARREGADO NÃO CONSTA NO EXCEL',
+            'Explicação IA': 'Arquivo presente nos documentos importados, porém a chave não foi localizada na planilha Excel.',
+            'Valor Total (R$)': f.nfeData?.impostos?.valorTotal || 0,
+            'Emitente': f.nfeData?.emitente?.nome || '',
+            'CNPJ Emitente': emitCNPJ,
+            'Nome do Arquivo': f.fileName,
+            'Tipo Documento': f.xmlContent ? 'XML' : 'PDF',
+          })
+        }
+      })
+    } else {
+      // Caso não haja planilha Excel carregada
+      const orderedAllResults = [...validFiles].sort((a, b) => {
+        const keyA = getNormalizedKey(a)
+        const keyB = getNormalizedKey(b)
+        return keyA.localeCompare(keyB)
+      })
+
+      rowsTotalOrdered = orderedAllResults.map((f) => {
+        const key = getNormalizedKey(f)
+        const destCNPJ = f.nfeData?.destinatario?.cpfCnpj || ''
+        const emitCNPJ = f.nfeData?.emitente?.cnpj || ''
+        const vCNPJ = f.nfeData?.verificacaoCNPJ || verifyChaveCNPJ(key, emitCNPJ, destCNPJ)
+        const qtdNota = getFileQuantidade(f)
+
+        const numNF = extractNumeroNF(f.nfeData?.numero || f.parsedData?.nNF, key)
+        const dtEmissao = extractDataEmissao(f.nfeData?.dataEmissao || f.parsedData?.dhEmi || f.parsedData?.dataEmissao, key)
+
+        return {
+          'Posição / Linha Excel': 'Fora da Planilha Excel',
+          'Status Conferência Excel': 'SEM PLANILHA EXCEL',
+          'Vagão (Excel)': 'N/A',
+          'Chave de Acesso': key,
+          'Número NF': numNF,
+          'Data de Emissão': dtEmissao,
+          'CNPJ na Chave': vCNPJ.chaveCnpj || 'N/I',
+          'Destinatário CNPJ': destCNPJ,
+          'Confronto (Chave vs Destinatário)': vCNPJ.confrontoChaveXDest,
+          'Validação CNPJ': vCNPJ.statusLabel,
+          'Nº Nota (nNF)': numNF,
+          'Série': f.nfeData?.serie || '',
+          'Peso Selecionado (Excel)': 'N/A',
+          'Peso Nota Vagão (Excel)': 'N/A',
+          'Tara (Excel)': 'N/A',
+          'Peso Bruto do Vagão (Soma Rateios + Tara)': 'N/A',
+          'Quantidade Extraída (Nota)': qtdNota,
+          'Confronto Peso (Excel vs Nota)': 'SEM PLANILHA',
+          'Diferença de Peso (Excel - Nota)': 'N/A',
+          'Quantidade Encontrada pela IA (Valor Real)': 'N/A',
+          'Auditoria IA (Status / Causa)': 'Sem planilha Excel carregada',
+          'Explicação IA': '',
+          'Valor Total (R$)': f.nfeData?.impostos?.valorTotal || 0,
+          'Emitente': f.nfeData?.emitente?.nome || '',
+          'CNPJ Emitente': emitCNPJ,
+          'Destinatário': f.nfeData?.destinatario?.nome || '',
+          'Nome do Arquivo': f.fileName,
+          'Tipo Documento': f.xmlContent ? 'XML' : 'PDF',
+        }
+      })
+    }
+    const wsTotalOrdered = createFormattedWorksheet(rowsTotalOrdered)
+    XLSX.utils.book_append_sheet(wb, wsTotalOrdered, 'Total Arquivos (Ord. Excel)')
+
+    // 5. ABA NOTAS ENCONTRADAS NA PLANILHA EXCEL
+    const orderedMatchedResults = [...matchedResults].sort((a, b) => {
+      const keyA = getNormalizedKey(a)
+      const keyB = getNormalizedKey(b)
+      const rowA = getExcelMatchInfo(keyA)?.row ?? 9999999
+      const rowB = getExcelMatchInfo(keyB)?.row ?? 9999999
+      return rowA - rowB
+    })
+
+    const rowsMatched = orderedMatchedResults.map((f) => {
+      const key = getNormalizedKey(f)
+      const matchInfo = getExcelMatchInfo(key)
+      const destCNPJ = f.nfeData?.destinatario?.cpfCnpj || ''
+      const emitCNPJ = f.nfeData?.emitente?.cnpj || ''
+      const vCNPJ = f.nfeData?.verificacaoCNPJ || verifyChaveCNPJ(key, emitCNPJ, destCNPJ)
+      const qtdNota = getFileQuantidade(f)
+      const vWeight = confrontWeights(matchInfo, qtdNota)
+      const itemAudit = auditResultsMap[key || f.fileName]
+      const pesoIaEncontrado = itemAudit?.pesoCorrigidoDoc !== undefined && itemAudit?.pesoCorrigidoDoc !== null
+        ? itemAudit.pesoCorrigidoDoc
+        : (overrideWeightsMap[key || f.fileName] !== undefined ? overrideWeightsMap[key || f.fileName] : qtdNota)
+      const numNF = extractNumeroNF(f.nfeData?.numero || f.parsedData?.nNF, key)
+      const dtEmissao = extractDataEmissao(f.nfeData?.dataEmissao || f.parsedData?.dhEmi || f.parsedData?.dataEmissao, key)
+
+      return {
+        'Linha no Excel': matchInfo ? `Linha ${matchInfo.row}` : 'N/A',
+        'Aba no Excel': matchInfo?.sheetName || '',
+        'Status Conferência': 'CONSTA NA PLANILHA EXCEL',
+        'Vagão (Excel)': matchInfo?.vagao || 'N/A',
+        'Chave de Acesso': key,
+        'Número NF': numNF,
+        'Data de Emissão': dtEmissao,
+        'CNPJ na Chave': vCNPJ.chaveCnpj || 'N/I',
+        'Destinatário CNPJ': destCNPJ,
+        'Confronto (Chave vs Destinatário)': vCNPJ.confrontoChaveXDest,
+        'Validação CNPJ': vCNPJ.statusLabel,
+        'Nº Nota (nNF)': numNF,
+        'Série': f.nfeData?.serie || '',
+        'Peso Selecionado (Excel)': vWeight.pesoExcelStr,
+        'Peso Nota Vagão (Excel)': matchInfo?.pesoNotaVagaoStr || 'N/A',
+        'Tara (Excel)': matchInfo?.taraStr || 'N/A',
+        'Peso Bruto do Vagão (Soma Rateios + Tara)': matchInfo?.pesoBrutoStr || (matchInfo?.tara && matchInfo?.pesoNotaVagao ? (matchInfo.tara + matchInfo.pesoNotaVagao).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 3 }) : 'N/A'),
+        'Quantidade Extraída (Nota)': qtdNota,
+        'Confronto Peso (Excel vs Nota)': vWeight.statusLabel,
+        'Diferença de Peso (Excel - Nota)': vWeight.pesoExcel !== null ? vWeight.diferenca : 'N/A',
+        'Quantidade Encontrada pela IA (Valor Real)': pesoIaEncontrado,
+        'Auditoria IA (Status / Causa)': itemAudit?.status === 'ERRO_LEITURA_SISTEMA'
+          ? 'ERRO DE LEITURA DO SISTEMA (VALOR REAL ENCONTRADO)'
+          : itemAudit?.status === 'DIVERGENCIA_REAL'
+            ? 'DIVERGÊNCIA REAL DE PESAGEM'
+            : itemAudit?.status === 'CONFERIDO_CORRETO'
+              ? 'PESO CONFERIDO CORRETO'
+              : (vWeight.status === 'DIVERGENTE' ? 'Divergência não auditada pela IA' : 'PESO CORRETO / CONFERIDO'),
+        'Explicação IA': itemAudit?.explicacao || '',
+        'Valor Total (R$)': f.nfeData?.impostos?.valorTotal || 0,
+        'Emitente': f.nfeData?.emitente?.nome || '',
+        'CNPJ Emitente': emitCNPJ,
+        'Destinatário': f.nfeData?.destinatario?.nome || '',
+        'Nome do Arquivo': f.fileName,
+        'Tipo Documento': f.xmlContent ? 'XML' : 'PDF',
+      }
+    })
+    const wsMatched = createFormattedWorksheet(rowsMatched)
+    XLSX.utils.book_append_sheet(wb, wsMatched, 'Notas Encontradas')
+
+    // 6. ABA NOTAS QUE NÃO CONSTAM NA PLANILHA EXCEL (SEMPRE GERADA)
+    const rowsUnmatched = unmatchedResults.length > 0
+      ? unmatchedResults.map((f) => {
+          const key = getNormalizedKey(f)
+          const destCNPJ = f.nfeData?.destinatario?.cpfCnpj || ''
+          const emitCNPJ = f.nfeData?.emitente?.cnpj || ''
+          const vCNPJ = f.nfeData?.verificacaoCNPJ || verifyChaveCNPJ(key, emitCNPJ, destCNPJ)
+          const qtdNota = getFileQuantidade(f)
+          const numNF = extractNumeroNF(f.nfeData?.numero || f.parsedData?.nNF, key)
+          const dtEmissao = extractDataEmissao(f.nfeData?.dataEmissao || f.parsedData?.dhEmi || f.parsedData?.dataEmissao, key)
+
+          return {
+            'Status Conferência': 'NÃO CONSTA NA PLANILHA EXCEL',
+            'Chave de Acesso': key,
+            'Número NF': numNF,
+            'Data de Emissão': dtEmissao,
+            'CNPJ na Chave': vCNPJ.chaveCnpj || 'N/I',
+            'Destinatário CNPJ': destCNPJ,
+            'Confronto (Chave vs Destinatário)': vCNPJ.confrontoChaveXDest,
+            'Validação CNPJ': vCNPJ.statusLabel,
+            'Nº Nota (nNF)': numNF,
+            'Série': f.nfeData?.serie || f.parsedData?.serie || (key.length === 44 ? key.substring(22, 25).replace(/^0+/, '') : ''),
+            'Quantidade Extraída (Nota)': qtdNota,
+            'Valor Total (R$)': f.nfeData?.impostos?.valorTotal || f.parsedData?.vNF || 0,
+            'Emitente': f.nfeData?.emitente?.nome || f.parsedData?.emitNome || '',
+            'CNPJ Emitente': emitCNPJ,
+            'Destinatário': f.nfeData?.destinatario?.nome || f.parsedData?.destNome || '',
+            'Nome do Arquivo': f.fileName,
+            'Tipo Documento': f.xmlContent ? 'XML' : 'PDF',
+            'Observação': 'Nota fiscal importada mas a chave de acesso não foi encontrada na planilha Excel',
+          }
+        })
+      : [
+          {
+            'Status Conferência': 'NENHUMA NOTA AUSENTE',
+            'Chave de Acesso': 'TODAS AS NOTAS FORAM ENCONTRADAS NA PLANILHA EXCEL',
+            'Número NF': '-',
+            'Data de Emissão': '-',
+            'CNPJ na Chave': '-',
+            'Destinatário CNPJ': '-',
+            'Confronto (Chave vs Destinatário)': '-',
+            'Validação CNPJ': '-',
+            'Nº Nota (nNF)': '-',
+            'Série': '-',
+            'Quantidade Extraída (Nota)': 0,
+            'Valor Total (R$)': 0,
+            'Emitente': '-',
+            'CNPJ Emitente': '-',
+            'Destinatário': '-',
+            'Nome do Arquivo': '-',
+            'Tipo Documento': '-',
+            'Observação': 'Todas as notas fiscais importadas constam perfeitamente na planilha Excel.',
+          },
+        ]
+    const wsUnmatched = createFormattedWorksheet(rowsUnmatched)
+    XLSX.utils.book_append_sheet(wb, wsUnmatched, 'Notas Ausentes no Excel')
+
+    // 7. ABA CHAVES / LINHAS NA PLANILHA EXCEL SEM ARQUIVO CORRESPONDENTE (SEMPRE GERADA)
+    if (excelData) {
+      const rowsExcelOnly = excelRowsWithoutFiles.map((rowRec) => {
+        const cleanKey = (rowRec.key || '').replace(/\D/g, '')
+        const matchInfo = cleanKey ? getExcelMatchInfo(cleanKey) : null
+        const isMissingFile = !!cleanKey
+
+        // Localizar a nota correspondente no sistema (se houver)
+        let noteFile = cleanKey ? (filesByKey.get(cleanKey) || (cleanKey.length === 44 && cleanKey.startsWith('0') ? filesByKey.get(cleanKey.substring(1)) : null) || (cleanKey.length === 43 ? filesByKey.get('0' + cleanKey) : null)) : null
+
+        const rawNFFromKey = cleanKey.length === 44 ? cleanKey.substring(25, 34) : ''
+        const derivedNF = extractNumeroNF(rowRec.numero || rawNFFromKey, cleanKey)
+
+        if (!noteFile && derivedNF && derivedNF !== 'N/I' && derivedNF !== 'N/A') {
+          noteFile = filesByNumero.get(derivedNF.replace(/^0+/, ''))
+        }
+
+        // Pega a data completa DIRETO DA NOTA (como o sistema já faz em outras planilhas)
+        const rawDateFromNote = noteFile?.nfeData?.dataEmissao || noteFile?.parsedData?.dhEmi || noteFile?.parsedData?.dataEmissao
+        const rawDateFromExcel = rowRec.dataEmissao || matchInfo?.dataEmissao
+        const rawDate = rawDateFromNote || rawDateFromExcel
+
+        const dtEmissao = cleanKey || rawDate ? extractDataEmissao(rawDate, cleanKey) : 'N/A'
+        const numNF = noteFile ? extractNumeroNF(noteFile.nfeData?.numero || noteFile.parsedData?.nNF, cleanKey) : (derivedNF || 'N/A')
+
+        const emitCNPJ = noteFile?.nfeData?.emitente?.cnpj || noteFile?.parsedData?.emitCNPJ || (cleanKey.length === 44 ? formatCNPJ(cleanKey.substring(6, 20)) : '')
+        const destCNPJ = noteFile?.nfeData?.destinatario?.cpfCnpj || noteFile?.parsedData?.destCNPJ || ''
+        const vCNPJ = noteFile?.nfeData?.verificacaoCNPJ || (cleanKey ? verifyChaveCNPJ(cleanKey, emitCNPJ, destCNPJ) : { chaveCnpj: '', confrontoChaveXDest: 'Não confrontado', statusLabel: 'N/A', details: '' })
+        const serie = noteFile?.nfeData?.serie || noteFile?.parsedData?.serie || (cleanKey.length === 44 ? cleanKey.substring(22, 25).replace(/^0+/, '') : '')
+        const qtdNota = noteFile ? getFileQuantidade(noteFile) : 0
+        const valorTotal = noteFile?.nfeData?.impostos?.valorTotal || noteFile?.parsedData?.vNF || 0
+        const emitNome = noteFile?.nfeData?.emitente?.nome || noteFile?.parsedData?.emitNome || ''
+        const destNome = noteFile?.nfeData?.destinatario?.nome || noteFile?.parsedData?.destNome || ''
+        const fileName = noteFile?.fileName || (isMissingFile ? 'Nenhum arquivo importado' : '-')
+        const tipoDoc = noteFile ? (noteFile.xmlContent ? 'XML' : 'PDF') : (isMissingFile ? 'Sem Arquivo' : '-')
+
+        return {
+          'Status Conferência': isMissingFile
+            ? (noteFile ? 'CONSTA NA PLANILHA EXCEL (VINCULADA)' : 'FALTANDO ARQUIVO DE NOTA (PDF/XML)')
+            : 'LINHA NO EXCEL SEM CHAVE DE ACESSO',
+          'Chave de Acesso': cleanKey || 'SEM CHAVE NA LINHA',
+          'Número NF': cleanKey ? numNF : 'N/A',
+          'Data de Emissão': cleanKey ? dtEmissao : 'N/A',
+          'CNPJ na Chave': vCNPJ.chaveCnpj || (cleanKey.length === 44 ? formatCNPJ(cleanKey.substring(6, 20)) : '-'),
+          'Destinatário CNPJ': destCNPJ || '-',
+          'Confronto (Chave vs Destinatário)': vCNPJ.confrontoChaveXDest || '-',
+          'Validação CNPJ': vCNPJ.statusLabel || '-',
+          'Nº Nota (nNF)': cleanKey ? numNF : 'N/A',
+          'Série': serie || '-',
+          'Quantidade Extraída (Nota)': qtdNota,
+          'Valor Total (R$)': valorTotal,
+          'Emitente': emitNome || '-',
+          'CNPJ Emitente': emitCNPJ || '-',
+          'Destinatário': destNome || '-',
+          'Nome do Arquivo': fileName,
+          'Tipo Documento': tipoDoc,
+          'Linha no Excel': `Linha ${rowRec.row}`,
+          'Aba no Excel': rowRec.sheetName,
+          'Chave de Acesso (Excel)': cleanKey || 'SEM CHAVE NA LINHA',
+          'Vagão (Excel)': rowRec.vagao || matchInfo?.vagao || 'N/A',
+          'Peso Selecionado (Excel)': rowRec.pesoSelecionadoStr || matchInfo?.pesoSelecionadoStr || 'N/A',
+          'Peso Nota Vagão (Excel)': rowRec.pesoNotaVagaoStr || matchInfo?.pesoNotaVagaoStr || 'N/A',
+          'Tara (Excel)': rowRec.taraStr || matchInfo?.taraStr || 'N/A',
+          'Peso Bruto do Vagão': rowRec.pesoBrutoStr || matchInfo?.pesoBrutoStr || 'N/A',
+          'Conteúdo Original Célula': rowRec.rawValue || matchInfo?.rawValue || '',
+          'Status': isMissingFile ? (noteFile ? 'ARQUIVO LOCALIZADO / VINCULADO' : 'FALTANDO ARQUIVO DE NOTA (PDF/XML)') : 'LINHA NO EXCEL SEM CHAVE DE ACESSO',
+          'Observação': noteFile
+            ? 'Nota fiscal identificada no sistema para esta chave da planilha Excel'
+            : (isMissingFile
+              ? 'Chave de 44 dígitos consta na planilha Excel, porém nenhum arquivo correspondente foi importado'
+              : 'Linha presente na planilha Excel sem chave de acesso de 44 dígitos identificada'),
+        }
+      })
+
+      // Se todas as notas estiverem 100% presentes, exibe uma linha informativa clara com todas as colunas
+      if (rowsExcelOnly.length === 0) {
+        rowsExcelOnly.push({
+          'Status Conferência': 'TODAS AS CHAVES FORAM ENCONTRADAS (100% CONFERIDO)',
+          'Chave de Acesso': '-',
+          'Número NF': '-',
+          'Data de Emissão': '-',
+          'CNPJ na Chave': '-',
+          'Destinatário CNPJ': '-',
+          'Confronto (Chave vs Destinatário)': '-',
+          'Validação CNPJ': '-',
+          'Nº Nota (nNF)': '-',
+          'Série': '-',
+          'Quantidade Extraída (Nota)': 0,
+          'Valor Total (R$)': 0,
+          'Emitente': '-',
+          'CNPJ Emitente': '-',
+          'Destinatário': '-',
+          'Nome do Arquivo': '-',
+          'Tipo Documento': '-',
+          'Linha no Excel': 'Nenhuma pendência',
+          'Aba no Excel': '-',
+          'Chave de Acesso (Excel)': '-',
+          'Vagão (Excel)': '-',
+          'Peso Selecionado (Excel)': '-',
+          'Peso Nota Vagão (Excel)': '-',
+          'Tara (Excel)': '-',
+          'Peso Bruto do Vagão': '-',
+          'Conteúdo Original Célula': '-',
+          'Status': 'TODAS AS CHAVES FORAM ENCONTRADAS (100% CONFERIDO)',
+          'Observação': 'Todos os arquivos correspondentes às chaves da planilha Excel foram carregados com sucesso.',
+        })
+      }
+      const wsExcelOnly = createFormattedWorksheet(rowsExcelOnly)
+      XLSX.utils.book_append_sheet(wb, wsExcelOnly, 'Chaves Excel Sem Arquivo')
+    }
+
+    // 8. ABA DIVERGÊNCIAS DE PESO
+    const divergentWeightRows = validFiles
+      .filter((f) => {
+        const key = getNormalizedKey(f)
+        const matchInfo = getExcelMatchInfo(key)
+        const qtd = getFileQuantidade(f)
+        const vWeight = confrontWeights(matchInfo, qtd)
+        return vWeight.status === 'DIVERGENTE'
+      })
+      .map((f) => {
+        const key = getNormalizedKey(f)
+        const matchInfo = getExcelMatchInfo(key)
+        const qtdNota = getFileQuantidade(f)
+        const vWeight = confrontWeights(matchInfo, qtdNota)
+        return {
+          'Arquivo': f.fileName,
+          'Nº Nota': f.nfeData?.numero || '',
+          'Chave de Acesso': key,
+          'Linha no Excel': matchInfo?.row || '',
+          'Vagão': matchInfo?.vagao || '',
+          'Peso na Nota': qtdNota,
+          'Peso no Excel': matchInfo?.pesoSelecionadoStr || '',
+          'Diferença': vWeight.diferenca,
+          'Detalhes': vWeight.detalhes,
+        }
+      })
+    if (divergentWeightRows.length > 0) {
+      XLSX.utils.book_append_sheet(wb, createFormattedWorksheet(divergentWeightRows), 'Divergências de Peso')
+    }
+
+    // ABA CCT (SEM DUPLICADAS - EXTRAÍDO DAS NOTAS)
+    const uniqueNotesMap = new Map<string, any>()
+    validFiles.forEach((f) => {
+      const keyRaw = getNormalizedKey(f) || f.parsedData?.chave || f.nfeData?.chaveAcesso || ''
+      const cleanKey = keyRaw.replace(/\D/g, '').trim() || keyRaw.trim()
+      const dedupeKey = cleanKey || f.fileName
+
+      if (!dedupeKey || uniqueNotesMap.has(dedupeKey)) return
+
+      const rawDate = f.nfeData?.dataEmissao || f.parsedData?.dhEmi || f.parsedData?.dataEmissao
+      const dtEmissao = extractDataEmissao(rawDate, cleanKey) || 'N/A'
+      const qtdNota = getFileQuantidade(f)
+      const cliente =
+        f.nfeData?.destinatario?.nome ||
+        f.parsedData?.destNome ||
+        f.parsedData?.destFant ||
+        f.nfeData?.destinatario?.cpfCnpj ||
+        f.parsedData?.destCNPJ ||
+        'NÃO INFORMADO'
+
+      uniqueNotesMap.set(dedupeKey, {
+        'CHAVE NFE': String(cleanKey || 'SEM CHAVE IDENTIFICADA'),
+        'DATA NFE': String(dtEmissao),
+        'PESO NFE': Number(qtdNota) || 0,
+        'CLIENTE': String(cliente),
+        'NUMERO de CARACTERES CHAVE': Number(cleanKey ? cleanKey.length : 0),
+      })
+    })
+
+    const rowsUniqueChaves = Array.from(uniqueNotesMap.values())
+    const wsUnique = createFormattedWorksheet(
+      rowsUniqueChaves.length > 0
+        ? rowsUniqueChaves
+        : [
+            {
+              'CHAVE NFE': 'NENHUMA NOTA PROCESSADA',
+              'DATA NFE': '-',
+              'PESO NFE': 0,
+              'CLIENTE': '-',
+              'NUMERO de CARACTERES CHAVE': 0,
+            },
+          ]
+    )
+    XLSX.utils.book_append_sheet(wb, wsUnique, 'CCT')
+
+    XLSX.writeFile(wb, `relatorio_conferencia_chaves_${new Date().toISOString().slice(0, 10)}.xlsx`)
+
+      logRealtimeActivity(
+        'reconcile_mdf',
+        'Conferência de Chaves Exportada',
+        `Relatório de conferência fiscal exportado com ${validFiles.length} nota(s) verificada(s) e ${divergentWeightRows.length} divergência(s) de peso.`,
+        {
+          filesCount: validFiles.length,
+          divergentCount: divergentWeightRows.length,
+        }
+      )
+    } catch (error) {
+      console.error('Erro ao exportar relatório com IA:', error)
+      alert('Ocorreu um erro durante a conferência e exportação do relatório. Verifique os dados e tente novamente.')
+    } finally {
+      setIsExportingExcelWithAI(false)
+    }
+  }
+
+  // Executar auditoria de divergências de peso com IA em lote
+  const handleRunAiAuditAll = async () => {
+    const divergentFiles = validFiles.filter((f) => {
+      const key = getNormalizedKey(f)
+      const matchInfo = getExcelMatchInfo(key)
+      const qtd = getFileQuantidade(f)
+      const vWeight = confrontWeights(matchInfo, qtd)
+      return isMatchedWithDivergence(matchInfo, vWeight)
+    })
+
+    if (divergentFiles.length === 0) {
+      alert('Nenhuma nota com divergência de peso encontrada para auditoria.')
+      return
+    }
+
+    setIsAuditingAllWeights(true)
+    try {
+      const payload: WeightAuditItemInput[] = divergentFiles.map((f) => {
+        const key = getNormalizedKey(f)
+        const matchInfo = getExcelMatchInfo(key)
+        const qtdNota = getFileQuantidade(f)
+        const vWeight = confrontWeights(matchInfo, qtdNota)
+        const snippet = buildAuditSnippet(f, qtdNota, key, matchInfo)
+
+        return {
+          id: key || f.fileName,
+          identificador: f.nfeData?.numero ? `NF ${f.nfeData.numero}` : f.fileName,
+          numeroApenas: f.nfeData?.numero || '',
+          serie: f.nfeData?.serie || '',
+          pesoMDF: overrideWeightsMap[key || f.fileName] !== undefined ? overrideWeightsMap[key || f.fileName] : qtdNota,
+          pesoExcel: vWeight.pesoExcel || undefined,
+          diferencaPeso: vWeight.diferenca || undefined,
+          trechoTextoDocumento: snippet,
+          linhaExcel: matchInfo?.row,
+          dadosExcelRaw: matchInfo?.rawValue,
+        }
+      })
+
+      const response: WeightAuditResponse = await auditarDivergenciasComIA(payload)
+      setAuditSummary(response)
+      const newAuditMap: Record<string, WeightAuditItemResult> = { ...auditResultsMap }
+      response.resultados.forEach((res) => {
+        newAuditMap[res.id] = res
+      })
+      setAuditResultsMap(newAuditMap)
+    } catch (err) {
+      console.error('Erro na auditoria de IA:', err)
+      alert('Erro ao processar auditoria com IA.')
+    } finally {
+      setIsAuditingAllWeights(false)
+    }
+  }
+
+  const handleApplyAllNfeCorrections = () => {
+    const nextOverrides = { ...overrideWeightsMap }
+    let appliedCount = 0
+    Object.entries(auditResultsMap).forEach(([id, r]) => {
+      if (r.status === 'ERRO_LEITURA_SISTEMA' && r.pesoCorrigidoDoc !== undefined && r.pesoCorrigidoDoc !== null) {
+        nextOverrides[id] = r.pesoCorrigidoDoc
+        appliedCount++
+      }
+    })
+    setOverrideWeightsMap(nextOverrides)
+  }
+
+  const isMatchedWithDivergence = (matchInfo: ExcelMatchInfo | null, vWeight: any) => {
+    return !!matchInfo && vWeight.status === 'DIVERGENTE'
+  }
+
+  const matchedWeightCount = validFiles.filter((f) => {
+    const key = getNormalizedKey(f)
+    const matchInfo = getExcelMatchInfo(key)
+    const qtd = getFileQuantidade(f)
+    const vWeight = confrontWeights(matchInfo, qtd)
+    return !!matchInfo && vWeight.status === 'CONFERE'
+  }).length
+
+  const divergentWeightCount = validFiles.filter((f) => {
+    const key = getNormalizedKey(f)
+    const matchInfo = getExcelMatchInfo(key)
+    const qtd = getFileQuantidade(f)
+    const vWeight = confrontWeights(matchInfo, qtd)
+    return isMatchedWithDivergence(matchInfo, vWeight)
+  }).length
+
+  const hasPesoSelecionadoInExcel = Boolean(
+    excelData && (
+      (excelData.keysMap && Array.from(excelData.keysMap.values()).some((k) => k.pesoSelecionado !== undefined && k.pesoSelecionado !== null && k.pesoSelecionado > 0)) ||
+      validFiles.some((f) => {
+        const key = getNormalizedKey(f)
+        const matchInfo = getExcelMatchInfo(key)
+        return !!matchInfo && matchInfo.pesoSelecionado !== undefined && matchInfo.pesoSelecionado !== null && matchInfo.pesoSelecionado > 0
+      })
+    )
+  )
+
+  return (
+    <div className="space-y-6">
+      {/* Card Principal da Planilha Excel */}
+      <Card className="shadow-xs border-emerald-200 dark:border-emerald-900/60">
+        <CardHeader className="bg-emerald-50/40 dark:bg-emerald-950/20 border-b border-emerald-100 dark:border-emerald-900/40 pb-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-base font-bold flex items-center gap-2 text-emerald-950 dark:text-emerald-200">
+                <FileSpreadsheet className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
+                Conferência de Chaves & Pesos com Planilha Excel
+              </CardTitle>
+              <CardDescription className="text-xs text-emerald-800/80 dark:text-emerald-300/70 mt-0.5">
+                Carregue sua planilha logística/financeira (.xlsx, .xls, .csv) para confrontar automaticamente Chaves de Acesso, Vagões e Pesos de Balança.
+              </CardDescription>
+            </div>
+
+            {excelData && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <Button
+                  onClick={handleExportDigitacaoOnly}
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5 border-teal-300 dark:border-teal-800 text-teal-700 dark:text-teal-300 hover:bg-teal-100/50 dark:hover:bg-teal-950/40 text-xs font-semibold cursor-pointer"
+                  title="Exportar planilha formatada para digitação com Vagão concatenado, Bruto/Tara x1000 e sequência original"
+                >
+                  <FileSpreadsheet className="h-4 w-4 text-teal-600 dark:text-teal-400" />
+                  Planilha de Digitação (.xlsx)
+                </Button>
+                <Button
+                  onClick={handleExportReconciliationReport}
+                  size="sm"
+                  variant="outline"
+                  className="gap-2 border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100/50 dark:hover:bg-emerald-950/40 text-xs font-semibold cursor-pointer"
+                >
+                  <FileSpreadsheet className="h-4 w-4 text-emerald-600" />
+                  Baixar Relatório Completo (.xlsx)
+                </Button>
+                <Button
+                  onClick={handleRemoveExcel}
+                  size="sm"
+                  variant="ghost"
+                  className="text-xs text-zinc-500 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
+                >
+                  <X className="h-4 w-4 mr-1" />
+                  Remover Planilha
+                </Button>
+              </div>
+            )}
+          </div>
+        </CardHeader>
+
+        <CardContent className="pt-6 space-y-6">
+          {/* Dropzone de Planilha */}
+          {!excelData ? (
+            <div
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={handleExcelDrop}
+              className="flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-emerald-300 dark:border-emerald-900/60 p-8 text-center bg-emerald-50/20 dark:bg-emerald-950/5 hover:border-emerald-500 transition-all cursor-pointer"
+              onClick={() => excelInputRef.current?.click()}
+            >
+              <input
+                type="file"
+                ref={excelInputRef}
+                accept=".xlsx,.xls,.csv"
+                className="hidden"
+                onChange={handleExcelInputChange}
+              />
+              <div className="rounded-full bg-emerald-100 p-3.5 text-emerald-600 dark:bg-emerald-950/60 mb-3">
+                {isExcelLoading ? (
+                  <Loader2 className="h-7 w-7 animate-spin" />
+                ) : (
+                  <FileSpreadsheet className="h-7 w-7" />
+                )}
+              </div>
+              <p className="font-bold text-zinc-800 dark:text-zinc-200 text-sm">
+                Clique ou arraste aqui a planilha Excel para conferência das chaves e pesos
+              </p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 max-w-md">
+                O sistema identificará de forma automática todas as chaves de acesso (44 dígitos), números de vagões e colunas de peso presentes em qualquer aba.
+              </p>
+            </div>
+          ) : (
+            <>
+              {/* Barra de Status da Planilha Carregada */}
+              <div className="p-3.5 rounded-lg bg-emerald-50 border border-emerald-200 dark:bg-emerald-950/30 dark:border-emerald-900/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                <div className="flex items-center gap-2.5">
+                  <FileCheck2 className="h-5 w-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  <div>
+                    <span className="font-bold text-emerald-900 dark:text-emerald-200">
+                      Planilha Ativa: {excelData.fileName}
+                    </span>
+                    <span className="text-emerald-700 dark:text-emerald-400 ml-2">
+                      ({excelData.allKeysList.length} chaves de 44 dígitos encontradas em {excelData.totalRows} linhas)
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 self-start sm:self-auto">
+                  <button
+                    type="button"
+                    onClick={() => excelInputRef.current?.click()}
+                    className="text-emerald-700 hover:text-emerald-900 dark:text-emerald-400 dark:hover:text-emerald-200 underline font-medium cursor-pointer"
+                  >
+                    Trocar planilha
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleRemoveExcel}
+                    className="text-rose-600 hover:text-rose-800 dark:text-rose-400 dark:hover:text-rose-300 font-medium cursor-pointer"
+                  >
+                    Remover
+                  </button>
+                </div>
+                <input
+                  type="file"
+                  ref={excelInputRef}
+                  accept=".xlsx,.xls,.csv"
+                  className="hidden"
+                  onChange={handleExcelInputChange}
+                />
+              </div>
+
+              {/* Seletor da Coluna de Peso no Excel */}
+              <div className="p-3 rounded-xl bg-zinc-50 border border-zinc-200 dark:bg-zinc-900/50 dark:border-zinc-800 flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-xs">
+                <div className="flex items-center gap-2">
+                  <Scale className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  <div>
+                    <span className="font-bold text-zinc-800 dark:text-zinc-200">
+                      Coluna para Comparação de Peso no Excel:
+                    </span>
+                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">
+                      <span className="font-semibold text-emerald-600 dark:text-emerald-400">Regra Estrita Ativa:</span> Se o valor não for encontrado na coluna selecionada, o sistema <strong>NÃO</strong> busca em nenhuma outra coluna.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 w-full md:w-auto">
+                  <select
+                    value={selectedExcelWeightCol}
+                    onChange={(e) => handleExcelWeightColChange(e.target.value)}
+                    aria-label="Coluna para comparação de peso no Excel"
+                    className="w-full md:w-72 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 rounded-lg px-3 py-1.5 text-xs font-semibold text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  >
+                    <option value="auto">🎯 Automático: Procura &quot;Peso Selecionado&quot;</option>
+                    <option value="none">🚫 Não comparar peso (apenas chave)</option>
+                    {availableExcelColumns.length > 0 && (
+                      <optgroup label="Colunas detectadas no Excel">
+                        {availableExcelColumns.map((col) => (
+                          <option key={col} value={col}>
+                            Coluna: {col}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+                </div>
+              </div>
+
+              {/* Seção de Integração com CT-e (DACTE / XML) para Transbordo */}
+              <div className="p-4 rounded-xl border border-sky-200 dark:border-sky-900/60 bg-sky-50/40 dark:bg-sky-950/20 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-start gap-2.5">
+                    <div className="p-2 rounded-lg bg-sky-100 dark:bg-sky-900/60 text-sky-700 dark:text-sky-300 shrink-0">
+                      <TrainTrack className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h4 className="text-xs font-bold text-sky-950 dark:text-sky-100">
+                          CT-e de Transporte Ferroviário (Transbordo)
+                        </h4>
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-sky-100 text-sky-800 dark:bg-sky-900/70 dark:text-sky-300">
+                          {cteList.length > 0 ? `${cteList.length} CT-e(s) ativo(s)` : 'Opcional'}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-sky-800/80 dark:text-sky-300/80 mt-0.5">
+                        Carregue os arquivos PDF (DACTE) ou XML do CT-e para extrair automaticamente o CNPJ do Expedidor e preencher a coluna <strong className="font-semibold text-sky-900 dark:text-sky-200">&quot;transbordo do CTe&quot;</strong> para cada vagão na Planilha de Digitação.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <input
+                      type="file"
+                      ref={cteInputRef}
+                      multiple
+                      accept=".pdf,.xml"
+                      className="hidden"
+                      onChange={(e) => {
+                        if (e.target.files && e.target.files.length > 0) {
+                          handleCteFilesUpload(e.target.files)
+                        }
+                      }}
+                    />
+                    <Button
+                      type="button"
+                      onClick={() => cteInputRef.current?.click()}
+                      disabled={isCteLoading}
+                      size="sm"
+                      className="bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs gap-1.5 cursor-pointer shadow-sm"
+                    >
+                      {isCteLoading ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          Processando CT-e...
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="h-3.5 w-3.5" />
+                          {cteList.length > 0 ? 'Adicionar mais CT-e(s)' : 'Carregar CT-e (PDF/XML)'}
+                        </>
+                      )}
+                    </Button>
+
+                    {cteList.length > 0 && (
+                      <Button
+                        type="button"
+                        onClick={handleRemoveAllCtes}
+                        size="sm"
+                        variant="ghost"
+                        className="text-xs text-zinc-500 hover:text-red-600 dark:hover:text-red-400 cursor-pointer h-8 px-2"
+                        title="Limpar todos os CT-es carregados"
+                      >
+                        <X className="h-3.5 w-3.5 mr-1" />
+                        Limpar
+                      </Button>
+                    )}
+                  </div>
+                </div>
+
+                {cteUploadFeedback && (
+                  <div className="p-2.5 rounded-lg bg-sky-100/80 border border-sky-300 dark:bg-sky-950/60 dark:border-sky-800 text-sky-900 dark:text-sky-200 text-xs font-medium flex items-center justify-between">
+                    <span>{cteUploadFeedback}</span>
+                    <button
+                      type="button"
+                      onClick={() => setCteUploadFeedback(null)}
+                      className="text-sky-700 hover:text-sky-900 dark:text-sky-300 text-xs ml-2 cursor-pointer font-bold"
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
+
+                {/* Card de Validação Consolidada de Transbordo */}
+                {(() => {
+                  if (cteList.length === 0) return null
+
+                  const transbordoCnpjsMap = new Map<string, { nome: string; municipio: string; count: number }>()
+                  cteList.forEach((c) => {
+                    const cnpj = c.expedidor.cnpjCpfFormatado || c.expedidor.cnpjCpf || c.expedidor.cnpjApenasDigitos
+                    if (cnpj) {
+                      const prev = transbordoCnpjsMap.get(cnpj) || {
+                        nome: c.expedidor.nome || '',
+                        municipio: c.expedidor.municipio || '',
+                        count: 0,
+                      }
+                      prev.count += 1
+                      if (!prev.nome && c.expedidor.nome) prev.nome = c.expedidor.nome
+                      if (!prev.municipio && c.expedidor.municipio) prev.municipio = c.expedidor.municipio
+                      transbordoCnpjsMap.set(cnpj, prev)
+                    }
+                  })
+
+                  const uniqueCnpjs = Array.from(transbordoCnpjsMap.keys())
+                  const isHomogeneous = uniqueCnpjs.length === 1
+
+                  if (isHomogeneous && uniqueCnpjs[0]) {
+                    const cnpj = uniqueCnpjs[0]
+                    const info = transbordoCnpjsMap.get(cnpj)!
+                    return (
+                      <div className="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-800 text-emerald-900 dark:text-emerald-100 flex items-start gap-3">
+                        <CheckCircle2 className="h-5 w-5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                        <div className="space-y-1 text-xs">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-emerald-950 dark:text-emerald-50 text-sm">
+                              Transbordo 100% Homogêneo e Validado
+                            </span>
+                            <span className="px-2 py-0.5 rounded text-[11px] font-extrabold bg-emerald-200/80 text-emerald-900 dark:bg-emerald-900 dark:text-emerald-200">
+                              {cteList.length} de {cteList.length} CT-e(s)
+                            </span>
+                          </div>
+                          <div className="text-emerald-800 dark:text-emerald-200">
+                            Todos os CT-es carregados apontam para o mesmo Transbordo/Expedidor:{' '}
+                            <strong className="font-mono font-bold text-emerald-950 dark:text-emerald-100 text-xs bg-emerald-100/80 dark:bg-emerald-900/60 px-1.5 py-0.5 rounded">
+                              {cnpj}
+                            </strong>
+                            {info.nome && <span className="font-semibold ml-1.5">— {info.nome}</span>}
+                            {info.municipio && <span className="ml-1">({info.municipio})</span>}
+                          </div>
+                          <p className="text-[11px] text-emerald-700 dark:text-emerald-300">
+                            ✓ <strong>Preenchimento Automático Global:</strong> Todas as linhas da Planilha de Digitação receberão o CNPJ <code>{cnpj}</code> na coluna <strong>&quot;transbordo do CTe&quot;</strong>, sem necessidade de correlação individual de vagão.
+                          </p>
+                        </div>
+                      </div>
+                    )
+                  }
+
+                  if (uniqueCnpjs.length > 1) {
+                    return (
+                      <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-100 flex items-start gap-3">
+                        <AlertTriangle className="h-5 w-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                        <div className="space-y-1 text-xs">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-amber-950 dark:text-amber-50 text-sm">
+                              Atenção: Múltiplos CNPJs de Transbordo Detectados nos CT-es
+                            </span>
+                            <span className="px-2 py-0.5 rounded text-[11px] font-extrabold bg-amber-200 text-amber-900 dark:bg-amber-900 dark:text-amber-200">
+                              {uniqueCnpjs.length} transbordos distintos
+                            </span>
+                          </div>
+                          <div className="text-amber-800 dark:text-amber-200">
+                            Foram identificados CT-es com CNPJs de expedidor diferentes:{' '}
+                            {uniqueCnpjs.map((c) => {
+                              const inf = transbordoCnpjsMap.get(c)
+                              return (
+                                <span key={c} className="font-mono font-bold bg-amber-100 dark:bg-amber-900/60 px-1.5 py-0.5 rounded mr-1.5">
+                                  {c} {inf?.nome ? `(${inf.nome})` : ''}
+                                </span>
+                              )
+                            })}
+                          </div>
+                          <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                            O sistema utilizará a correlação individual por NF-e ou preencherá com o transbordo correspondente.
+                          </p>
+                        </div>
+                      </div>
+                    )
+                  }
+
+                  return null
+                })()}
+
+                {cteList.length > 0 && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 pt-1">
+                    {cteList.map((cte, idx) => {
+                      const expedidorCnpj =
+                        cte.expedidor.cnpjCpfFormatado ||
+                        cte.expedidor.cnpjCpf ||
+                        cte.expedidor.cnpjApenasDigitos ||
+                        'N/I'
+                      const vagoesList = cte.vagoes.map((v) => v.numero).filter(Boolean).join(', ')
+
+                      return (
+                        <div
+                          key={`${cte.chaveAcesso || 'cte'}_${cte.fileName || 'file'}_${idx}`}
+                          className="p-2.5 rounded-lg bg-white dark:bg-zinc-900 border border-sky-200 dark:border-sky-900/60 text-xs flex flex-col justify-between space-y-1.5"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-center gap-1.5 overflow-hidden">
+                              <FileText className="h-4 w-4 text-sky-600 shrink-0" />
+                              <span className="font-semibold text-zinc-900 dark:text-zinc-100 truncate" title={cte.fileName}>
+                                {cte.numero ? `CT-e Nº ${cte.numero}` : cte.fileName}
+                              </span>
+                            </div>
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-sky-50 dark:bg-sky-950 text-sky-700 dark:text-sky-300 shrink-0">
+                              {cte.vagoes.length > 0 ? `${cte.vagoes.length} vagão(ões)` : 'Sem vagão'}
+                            </span>
+                          </div>
+
+                          <div className="space-y-0.5 text-[11px]">
+                            <div className="text-zinc-600 dark:text-zinc-400">
+                              <span className="font-semibold text-sky-800 dark:text-sky-300">CNPJ Transbordo:</span>{' '}
+                              <span className="font-mono text-zinc-800 dark:text-zinc-200 font-bold">{expedidorCnpj}</span>
+                            </div>
+                            {cte.expedidor.nome && (
+                              <div className="text-zinc-500 dark:text-zinc-400 truncate" title={cte.expedidor.nome}>
+                                {cte.expedidor.nome} {cte.expedidor.municipio ? `(${cte.expedidor.municipio})` : ''}
+                              </div>
+                            )}
+                            {vagoesList ? (
+                              <div className="text-[10px] text-zinc-500 dark:text-zinc-400 truncate" title={`Vagões: ${vagoesList}`}>
+                                <span className="font-semibold text-zinc-700 dark:text-zinc-300">Vagão(ões):</span> {vagoesList}
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Banner de Auditoria IA se houver divergências de peso */}
+              {divergentWeightCount > 0 && (
+                <div className="p-4 rounded-xl border border-purple-200 dark:border-purple-900 bg-purple-50/70 dark:bg-purple-950/30 flex flex-col gap-3 shadow-xs">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5">
+                      <div className="p-2 rounded-lg bg-purple-100 dark:bg-purple-900/60 text-purple-700 dark:text-purple-300 shrink-0">
+                        <BrainCircuit className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-bold text-purple-950 dark:text-purple-100 flex items-center gap-2">
+                          <span>{divergentWeightCount} Divergência{divergentWeightCount > 1 ? 's' : ''} de Peso Detectada{divergentWeightCount > 1 ? 's' : ''}</span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-200 text-purple-900 dark:bg-purple-800 dark:text-purple-100 font-bold">
+                            Auditoria em Lote
+                          </span>
+                        </h4>
+                        <p className="text-[11px] text-purple-800/80 dark:text-purple-300/80 mt-0.5">
+                          A IA analisa o texto/DANFE de <strong>todas as {divergentWeightCount} notas com divergência</strong> em uma única execução para localizar os valores reais no campo QUANT / Peso Líquido.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Button
+                        type="button"
+                        onClick={handleRunAiAuditAll}
+                        disabled={isAuditingAllWeights}
+                        size="sm"
+                        className="bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs gap-1.5 cursor-pointer shadow-xs"
+                      >
+                        {isAuditingAllWeights ? (
+                          <>
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            Auditando todas as {divergentWeightCount} notas...
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="h-3.5 w-3.5" />
+                            Auditar Todas as {divergentWeightCount} com IA
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+
+                  {auditSummary && (
+                    <div className="pt-2 border-t border-purple-200/80 dark:border-purple-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <span className="font-bold text-zinc-800 dark:text-zinc-200 flex items-center gap-1">
+                          <BrainCircuit className="h-3.5 w-3.5 text-purple-600" />
+                          Veredito da IA:
+                        </span>
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300 font-semibold text-[11px]">
+                          {auditSummary.totalErrosLeitura} Erros de Leitura (Valor Real Encontrado)
+                        </span>
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300 font-semibold text-[11px]">
+                          {auditSummary.totalDivergenciasReais} Divergências Reais
+                        </span>
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 font-semibold text-[11px]">
+                          {auditSummary.totalConferidos} Pesos Corretos
+                        </span>
+                      </div>
+
+                      {auditSummary.totalErrosLeitura > 0 && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          onClick={handleApplyAllNfeCorrections}
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold cursor-pointer h-7 px-3 flex items-center gap-1 self-start sm:self-auto"
+                        >
+                          <CheckCheck className="h-3.5 w-3.5" />
+                          Aplicar Valores Reais ({auditSummary.totalErrosLeitura})
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Cards de Métricas de Confronto */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
+                <div
+                  onClick={() => setExcelFilter('all')}
+                  className={`p-3 rounded-xl border transition-all cursor-pointer ${
+                    excelFilter === 'all'
+                      ? 'ring-2 ring-zinc-500 bg-zinc-100 dark:bg-zinc-800/80 border-zinc-400'
+                      : 'bg-zinc-50 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 hover:border-zinc-300'
+                  }`}
+                >
+                  <span className="text-zinc-500 font-medium block">Notas Carregadas</span>
+                  <span className="text-lg font-extrabold text-zinc-900 dark:text-zinc-100 mt-0.5 block">
+                    {validFiles.length}
+                  </span>
+                  <span className="text-[10px] text-zinc-400">arquivos no sistema</span>
+                </div>
+
+                <div
+                  onClick={() => setExcelFilter('matched')}
+                  className={`p-3 rounded-xl border transition-all cursor-pointer ${
+                    excelFilter === 'matched'
+                      ? 'ring-2 ring-emerald-500 bg-emerald-100/70 dark:bg-emerald-950/60 border-emerald-400'
+                      : 'bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900/40 hover:border-emerald-300'
+                  }`}
+                >
+                  <span className="text-emerald-700 dark:text-emerald-400 font-medium flex items-center justify-between">
+                    <span>Conferidas no Excel</span>
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                  </span>
+                  <span className="text-lg font-extrabold text-emerald-800 dark:text-emerald-200 mt-0.5 block">
+                    {matchedResults.length}
+                  </span>
+                  <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold">
+                    {validFiles.length > 0 ? Math.round((matchedResults.length / validFiles.length) * 100) : 0}% de cobertura
+                  </span>
+                </div>
+
+                <div
+                  onClick={() => setExcelFilter('matched')}
+                  className={`p-3 rounded-xl border transition-all cursor-pointer ${
+                    excelFilter === 'matched'
+                      ? 'ring-2 ring-teal-500 bg-teal-100/70 dark:bg-teal-950/60 border-teal-400'
+                      : 'bg-teal-50/60 dark:bg-teal-950/30 border-teal-200 dark:border-teal-900/40 hover:border-teal-300'
+                  }`}
+                >
+                  <span className="text-teal-700 dark:text-teal-400 font-medium flex items-center justify-between">
+                    <span>Peso Confere</span>
+                    <Scale className="h-3.5 w-3.5 text-teal-600" />
+                  </span>
+                  <span className="text-lg font-extrabold text-teal-800 dark:text-teal-200 mt-0.5 block">
+                    {matchedWeightCount}
+                  </span>
+                  <span className="text-[10px] text-teal-600 dark:text-teal-400 font-semibold">
+                    {!hasPesoSelecionadoInExcel ? 'Sem dados na peso selecionado' : 'Excel x Nota idênticos'}
+                  </span>
+                </div>
+
+                <div
+                  onClick={() => setExcelFilter('weight_divergent')}
+                  className={`p-3 rounded-xl border transition-all cursor-pointer ${
+                    excelFilter === 'weight_divergent'
+                      ? 'ring-2 ring-amber-500 bg-amber-100/70 dark:bg-amber-950/60 border-amber-400'
+                      : divergentWeightCount > 0
+                      ? 'bg-amber-50 dark:bg-amber-950/30 border-amber-300 dark:border-amber-900/50 hover:border-amber-400'
+                      : 'bg-zinc-50/50 dark:bg-zinc-900/30 border-zinc-200 dark:border-zinc-800'
+                  }`}
+                >
+                  <span className="text-amber-700 dark:text-amber-400 font-medium flex items-center justify-between">
+                    <span>Dif. de Peso</span>
+                    <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+                  </span>
+                  <span className={`text-lg font-extrabold mt-0.5 block ${divergentWeightCount > 0 ? 'text-amber-800 dark:text-amber-300' : 'text-zinc-700 dark:text-zinc-300'}`}>
+                    {divergentWeightCount}
+                  </span>
+                  <span className="text-[10px] text-amber-600 dark:text-amber-400 font-semibold">
+                    {!hasPesoSelecionadoInExcel
+                      ? 'Sem dados na peso selecionado'
+                      : divergentWeightCount > 0
+                      ? 'Exigem conferência'
+                      : 'Pesos alinhados'}
+                  </span>
+                </div>
+
+                <div
+                  onClick={() => setExcelFilter('unmatched')}
+                  className={`p-3 rounded-xl border transition-all cursor-pointer ${
+                    excelFilter === 'unmatched'
+                      ? 'ring-2 ring-rose-500 bg-rose-100/70 dark:bg-rose-950/60 border-rose-400'
+                      : 'bg-rose-50 dark:bg-rose-950/30 border-rose-200 dark:border-rose-900/40 hover:border-rose-300'
+                  }`}
+                >
+                  <span className="text-rose-700 dark:text-rose-400 font-medium flex items-center justify-between">
+                    <span>Ausentes no Excel</span>
+                    <XCircle className="h-3.5 w-3.5 text-rose-600" />
+                  </span>
+                  <span className="text-lg font-extrabold text-rose-800 dark:text-rose-200 mt-0.5 block">
+                    {unmatchedResults.length}
+                  </span>
+                  <span className="text-[10px] text-rose-600 dark:text-rose-400">chaves não localizadas</span>
+                </div>
+
+                <div
+                  onClick={() => setExcelFilter('excel_only')}
+                  className={`p-3 rounded-xl border transition-all cursor-pointer ${
+                    excelFilter === 'excel_only'
+                      ? 'ring-2 ring-indigo-500 bg-indigo-100/70 dark:bg-indigo-950/60 border-indigo-400'
+                      : 'bg-indigo-50 dark:bg-indigo-950/30 border-indigo-200 dark:border-indigo-900/40 hover:border-indigo-300'
+                  }`}
+                >
+                  <span className="text-indigo-700 dark:text-indigo-400 font-medium flex items-center justify-between">
+                    <span>No Excel s/ Arquivo</span>
+                    <FileQuestion className="h-3.5 w-3.5 text-indigo-600" />
+                  </span>
+                  <span className="text-lg font-extrabold text-indigo-800 dark:text-indigo-200 mt-0.5 block">
+                    {excelRowsWithoutFiles.length}
+                  </span>
+                  <span className="text-[10px] text-indigo-600 dark:text-indigo-400">itens faltantes</span>
+                </div>
+              </div>
+
+              {/* Filtros e Busca dos Resultados de Confronto */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => setExcelFilter('all')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      excelFilter === 'all'
+                        ? 'bg-zinc-800 text-white dark:bg-zinc-200 dark:text-zinc-900 shadow-xs'
+                        : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300'
+                    }`}
+                  >
+                    Todas ({validFiles.length})
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setExcelFilter('matched')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1 ${
+                      excelFilter === 'matched'
+                        ? 'bg-emerald-600 text-white shadow-xs'
+                        : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100 dark:bg-emerald-950/50 dark:text-emerald-300'
+                    }`}
+                  >
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    Conferidas ({matchedResults.length})
+                  </button>
+
+                  {divergentWeightCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setExcelFilter('weight_divergent')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1 ${
+                        excelFilter === 'weight_divergent'
+                          ? 'bg-amber-600 text-white shadow-xs'
+                          : 'bg-amber-50 text-amber-900 hover:bg-amber-100 dark:bg-amber-950/50 dark:text-amber-300'
+                      }`}
+                    >
+                      <Scale className="h-3.5 w-3.5" />
+                      Divergência Peso ({divergentWeightCount})
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => setExcelFilter('unmatched')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1 ${
+                      excelFilter === 'unmatched'
+                        ? 'bg-rose-600 text-white shadow-xs'
+                        : 'bg-rose-50 text-rose-800 hover:bg-rose-100 dark:bg-rose-950/50 dark:text-rose-300'
+                    }`}
+                  >
+                    <XCircle className="h-3.5 w-3.5" />
+                    Ausentes ({unmatchedResults.length})
+                  </button>
+
+                  {excelRowsWithoutFiles.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setExcelFilter('excel_only')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1 ${
+                        excelFilter === 'excel_only'
+                          ? 'bg-indigo-600 text-white shadow-xs'
+                          : 'bg-indigo-50 text-indigo-800 hover:bg-indigo-100 dark:bg-indigo-950/50 dark:text-indigo-300'
+                      }`}
+                    >
+                      <FileQuestion className="h-3.5 w-3.5" />
+                      No Excel sem Arquivo ({excelRowsWithoutFiles.length})
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap">
+                  {divergentWeightCount > 0 && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={handleRunAiAuditAll}
+                      disabled={isAuditingAllWeights}
+                      className="bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold gap-1.5 shadow-xs cursor-pointer h-8 px-3 shrink-0"
+                    >
+                      {isAuditingAllWeights ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          Auditando {divergentWeightCount} notas...
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="h-3.5 w-3.5" />
+                          Auditar Todas com IA ({divergentWeightCount})
+                        </>
+                      )}
+                    </Button>
+                  )}
+
+                  <div className="relative w-full sm:w-64">
+                    <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-zinc-400" />
+                    <input
+                      type="text"
+                      placeholder="Filtrar chave, nº nota, vagão..."
+                      value={excelSearchQuery}
+                      onChange={(e) => setExcelSearchQuery(e.target.value)}
+                      className="w-full bg-zinc-50 border border-zinc-200 dark:bg-zinc-900 dark:border-zinc-800 rounded-lg pl-8 pr-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Tabela de Resultados do Confronto */}
+              {excelFilter === 'excel_only' ? (
+                <div className="rounded-xl border border-indigo-100 dark:border-indigo-900/40 overflow-hidden bg-indigo-50/20 dark:bg-indigo-950/10">
+                  <div className="p-3 bg-indigo-100/50 dark:bg-indigo-950/40 border-b border-indigo-200 dark:border-indigo-900/50 flex items-center justify-between">
+                    <p className="text-xs font-bold text-indigo-900 dark:text-indigo-200 flex items-center gap-2">
+                      <FileQuestion className="h-4 w-4 text-indigo-600" />
+                      Linhas / Chaves na planilha Excel sem arquivo correspondente ({excelRowsWithoutFiles.length})
+                    </p>
+                  </div>
+                  <div className="divide-y divide-indigo-100 dark:divide-indigo-900/30 max-h-96 overflow-y-auto">
+                    {excelRowsWithoutFiles.map((rowRec, idx) => {
+                      const cleanKey = (rowRec.key || '').replace(/\D/g, '')
+                      const matchInfo = cleanKey ? getExcelMatchInfo(cleanKey) : null
+                      const rawNFFromKey = cleanKey.length === 44 ? cleanKey.substring(25, 34) : ''
+                      const derivedNF = extractNumeroNF(rowRec.numero || rawNFFromKey, cleanKey)
+                      const noteFile = cleanKey ? files.find((f) => {
+                        const fk = (f.nfeData?.chaveAcesso || f.parsedData?.chave || '').replace(/\D/g, '')
+                        if (fk === cleanKey) return true
+                        if (derivedNF && (f.nfeData?.numero === derivedNF || f.parsedData?.nNF === derivedNF)) return true
+                        return false
+                      }) : null
+                      const rawDate = noteFile?.nfeData?.dataEmissao || noteFile?.parsedData?.dhEmi || noteFile?.parsedData?.dataEmissao || rowRec.dataEmissao || matchInfo?.dataEmissao
+                      const dtEmissao = cleanKey || rawDate ? extractDataEmissao(rawDate, cleanKey) : ''
+                      const numNF = noteFile ? extractNumeroNF(noteFile.nfeData?.numero || noteFile.parsedData?.nNF, cleanKey) : (derivedNF || '')
+                      return (
+                        <div key={idx} className="p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                          <div className="space-y-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              {cleanKey && numNF && (
+                                <span className="text-[11px] font-bold text-indigo-900 dark:text-indigo-200 bg-indigo-100 dark:bg-indigo-950/80 px-2 py-0.5 rounded border border-indigo-200 dark:border-indigo-800">
+                                  NF {numNF}
+                                </span>
+                              )}
+                              {cleanKey && dtEmissao && dtEmissao !== 'N/I' && (
+                                <span className="text-[11px] font-medium text-emerald-800 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-200 dark:border-emerald-800">
+                                  Emissão: {dtEmissao}
+                                </span>
+                              )}
+                              <div className="flex items-center gap-1.5 font-mono font-semibold text-zinc-800 dark:text-zinc-200">
+                                {cleanKey ? (
+                                  <>
+                                    <span>{cleanKey}</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => copyToClipboard(cleanKey)}
+                                      className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors cursor-pointer"
+                                      title="Copiar chave"
+                                    >
+                                      {copiedKey === cleanKey ? <Check className="h-3.5 w-3.5 text-green-600" /> : <Copy className="h-3.5 w-3.5" />}
+                                    </button>
+                                  </>
+                                ) : (
+                                  <span className="text-amber-700 dark:text-amber-400 font-sans font-bold">
+                                    Linha {rowRec.row} ({rowRec.sheetName}) — Sem Chave de Acesso no Excel
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <p className="text-[11px] text-zinc-500">
+                              Encontrada na <span className="font-semibold">{rowRec.sheetName}</span> (Linha {rowRec.row})
+                              {rowRec.vagao && <span className="ml-2 font-bold text-indigo-600">| Vagão: {rowRec.vagao}</span>}
+                              {rowRec.pesoSelecionadoStr && (
+                                <span className="ml-2 font-medium text-emerald-700 dark:text-emerald-400">
+                                  | Peso Sel: {rowRec.pesoSelecionadoStr}
+                                </span>
+                              )}
+                              {rowRec.pesoNotaVagaoStr && (
+                                <span className="ml-2 font-medium text-sky-700 dark:text-sky-400">
+                                  | Rateio Vagão: {rowRec.pesoNotaVagaoStr}
+                                </span>
+                              )}
+                            </p>
+                          </div>
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold self-start sm:self-auto ${
+                            cleanKey
+                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                              : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                          }`}>
+                            {cleanKey ? 'Arquivo Faltante (PDF/XML)' : 'Sem Chave de 44 Dígitos'}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              ) : filteredResults.length === 0 ? (
+                <div className="p-8 text-center border border-dashed border-zinc-200 dark:border-zinc-800 rounded-xl">
+                  <FileQuestion className="h-8 w-8 text-zinc-400 mx-auto mb-2" />
+                  <p className="text-sm font-semibold text-zinc-600 dark:text-zinc-400">
+                    Nenhum resultado encontrado para o filtro selecionado.
+                  </p>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden divide-y divide-zinc-100 dark:divide-zinc-800">
+                  {excelFilter === 'weight_divergent' && (
+                    <div className="p-3 bg-amber-500/10 dark:bg-amber-950/40 border-b border-amber-200 dark:border-amber-900/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                      <div className="flex items-center gap-2">
+                        <Scale className="h-4 w-4 text-amber-600 shrink-0" />
+                        <span className="text-xs font-bold text-amber-900 dark:text-amber-200">
+                          Exibindo todas as {filteredResults.length} notas com divergência de peso
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Button
+                          type="button"
+                          size="sm"
+                          onClick={handleRunAiAuditAll}
+                          disabled={isAuditingAllWeights}
+                          className="bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold gap-1.5 shadow-xs cursor-pointer h-7 px-2.5"
+                        >
+                          {isAuditingAllWeights ? (
+                            <>
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                              Auditando todas...
+                            </>
+                          ) : (
+                            <>
+                              <Sparkles className="h-3 w-3" />
+                              Auditar Todas com IA ({divergentWeightCount})
+                            </>
+                          )}
+                        </Button>
+
+                        {auditSummary && auditSummary.totalErrosLeitura > 0 && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            onClick={handleApplyAllNfeCorrections}
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold cursor-pointer h-7 px-2.5 flex items-center gap-1"
+                          >
+                            <CheckCheck className="h-3.5 w-3.5" />
+                            Aplicar Todas as Correções ({auditSummary.totalErrosLeitura})
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {filteredResults.map((f, idx) => {
+                    const key = getNormalizedKey(f)
+                    const matchInfo = getExcelMatchInfo(key)
+                    const isMatched = !!matchInfo
+                    const qtdNota = getFileQuantidade(f)
+                    const vWeight = confrontWeights(matchInfo, qtdNota)
+                    const vCNPJ = f.nfeData?.verificacaoCNPJ || verifyChaveCNPJ(
+                      f.nfeData?.chaveAcesso || '',
+                      f.nfeData?.emitente?.cnpj || '',
+                      f.nfeData?.destinatario?.cpfCnpj || ''
+                    )
+
+                    return (
+                      <div
+                        key={idx}
+                        className={`p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 transition-colors ${
+                          isMatched
+                            ? 'bg-green-50/20 dark:bg-green-950/5 hover:bg-green-50/40'
+                            : 'bg-red-50/20 dark:bg-red-950/5 hover:bg-red-50/40'
+                        }`}
+                      >
+                        <div className="flex items-start gap-3 flex-1 min-w-0">
+                          {isMatched ? (
+                            <div className="rounded-full bg-green-100 p-2 text-green-700 dark:bg-green-950/60 dark:text-green-400 shrink-0 mt-0.5">
+                              <CheckCircle2 className="h-5 w-5" />
+                            </div>
+                          ) : (
+                            <div className="rounded-full bg-red-100 p-2 text-red-700 dark:bg-red-950/60 dark:text-red-400 shrink-0 mt-0.5">
+                              <XCircle className="h-5 w-5" />
+                            </div>
+                          )}
+
+                          <div className="space-y-1 min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span
+                                className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full ${
+                                  isMatched
+                                    ? 'bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-300'
+                                    : 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300'
+                                }`}
+                              >
+                                {isMatched
+                                  ? `CONSTA NA PLANILHA (Linha ${matchInfo?.row})`
+                                  : 'NÃO CONSTA NA PLANILHA'}
+                              </span>
+
+                              {isMatched && (
+                                <span
+                                  className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full inline-flex items-center gap-1 ${
+                                    vWeight.status === 'CONFERE'
+                                      ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                      : vWeight.status === 'DIVERGENTE'
+                                      ? 'bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200 border border-amber-300'
+                                      : 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300'
+                                  }`}
+                                  title={vWeight.detalhes}
+                                >
+                                  <Scale className="h-3 w-3" />
+                                  {vWeight.status === 'CONFERE'
+                                    ? `PESO OK (${vWeight.pesoExcelStr})`
+                                    : vWeight.status === 'DIVERGENTE'
+                                    ? `DIVERGÊNCIA PESO (Excel: ${vWeight.pesoExcelStr} vs Nota: ${vWeight.qtdNota})`
+                                    : 'PESO EXCEL S/ DADO'}
+                                </span>
+                              )}
+
+                              {vCNPJ.chaveCnpjRaw && (
+                                <span
+                                  className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full inline-flex items-center gap-1 ${
+                                    vCNPJ.isValid
+                                      ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                      : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                                  }`}
+                                >
+                                  {vCNPJ.isValid ? <CheckCircle2 className="h-3 w-3 text-emerald-600" /> : <AlertCircle className="h-3 w-3 text-rose-600" />}
+                                  {vCNPJ.statusLabel}
+                                </span>
+                              )}
+
+                              <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300 truncate">
+                                NF {f.nfeData?.numero || 'S/N'} - {f.fileName}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 text-xs font-mono text-zinc-600 dark:text-zinc-400 break-all">
+                              <span className="font-semibold text-zinc-400">Chave:</span>
+                              <span>{key || 'Chave não identificada'}</span>
+                              {key && (
+                                <button
+                                  type="button"
+                                  onClick={() => copyToClipboard(key)}
+                                  className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 transition-colors ml-1 shrink-0 cursor-pointer"
+                                  title="Copiar Chave de Acesso"
+                                >
+                                  {copiedKey === key ? (
+                                    <Check className="h-3.5 w-3.5 text-green-600" />
+                                  ) : (
+                                    <Copy className="h-3.5 w-3.5" />
+                                  )}
+                                </button>
+                              )}
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-zinc-500 dark:text-zinc-400 pt-0.5">
+                              {f.nfeData?.emitente?.nome && (
+                                <span>
+                                  Emitente: <b className="text-zinc-700 dark:text-zinc-200">{f.nfeData.emitente.nome}</b>
+                                </span>
+                              )}
+                              {f.nfeData?.destinatario?.nome && (
+                                <span>
+                                  Destinatário: <b className="text-zinc-700 dark:text-zinc-200">{f.nfeData.destinatario.nome}</b>
+                                </span>
+                              )}
+                              <span>
+                                Qtd/Peso Nota: <b className="text-zinc-800 dark:text-zinc-100">{qtdNota.toLocaleString('pt-BR')}</b>
+                              </span>
+                              {isMatched && (
+                                <>
+                                  {matchInfo?.vagao && (
+                                    <span>
+                                      Vagão: <b className="text-indigo-700 dark:text-indigo-300">{matchInfo.vagao}</b>
+                                    </span>
+                                  )}
+                                  {matchInfo?.pesoSelecionadoStr && (
+                                    <span>
+                                      Peso Sel. Excel: <b className="text-emerald-700 dark:text-emerald-300">{matchInfo.pesoSelecionadoStr}</b>
+                                    </span>
+                                  )}
+                                  {matchInfo?.pesoNotaVagaoStr && (
+                                    <span>
+                                      Peso Nota Vagão: <b className="text-sky-700 dark:text-sky-300">{matchInfo.pesoNotaVagaoStr}</b>
+                                    </span>
+                                  )}
+                                  {matchInfo?.taraStr && (
+                                    <span>
+                                      Tara: <b className="text-zinc-700 dark:text-zinc-300">{matchInfo.taraStr}</b>
+                                    </span>
+                                  )}
+                                  {matchInfo?.pesoBrutoStr && (
+                                    <span className="bg-amber-100/80 dark:bg-amber-950/50 text-amber-900 dark:text-amber-200 px-1.5 py-0.5 rounded font-semibold">
+                                      Peso Bruto: <b>{matchInfo.pesoBrutoStr}</b>
+                                    </span>
+                                  )}
+                                </>
+                              )}
+                            </div>
+
+                            {/* Detalhes da Auditoria de IA para a Nota Individual */}
+                            {(() => {
+                              const itemAudit = auditResultsMap[key || f.fileName]
+                              const hasDivergence = isMatched && vWeight.status === 'DIVERGENTE'
+                              const isAuditingThis = auditingKey === (key || f.fileName) || (isAuditingAllWeights && hasDivergence)
+
+                              if (itemAudit) {
+                                return (
+                                  <div className="mt-2 p-2.5 rounded-lg border border-purple-200 dark:border-purple-800/60 bg-purple-50/50 dark:bg-purple-950/30 text-xs space-y-1.5">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className="font-bold text-purple-900 dark:text-purple-200 flex items-center gap-1">
+                                        <Bot className="h-3.5 w-3.5 text-purple-600" />
+                                        Auditoria IA:
+                                      </span>
+                                      {itemAudit.status === 'ERRO_LEITURA_SISTEMA' && (
+                                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-200 text-purple-900 dark:bg-purple-900 dark:text-purple-200">
+                                          Erro de Leitura do Sistema
+                                        </span>
+                                      )}
+                                      {itemAudit.status === 'DIVERGENCIA_REAL' && (
+                                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-200 text-rose-900 dark:bg-rose-900 dark:text-rose-200">
+                                          Divergência Real
+                                        </span>
+                                      )}
+                                      {itemAudit.status === 'CONFERIDO_CORRETO' && (
+                                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-200 text-emerald-900 dark:bg-emerald-900 dark:text-emerald-200">
+                                          Peso Correto
+                                        </span>
+                                      )}
+                                      {itemAudit.pesoCorrigidoDoc !== undefined && itemAudit.pesoCorrigidoDoc !== null && (
+                                        <span className="font-black text-purple-800 dark:text-purple-300">
+                                          Valor Real: {itemAudit.pesoCorrigidoDoc.toLocaleString('pt-BR')} t
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className="text-[11px] text-zinc-700 dark:text-zinc-300">
+                                      {itemAudit.explicacao}
+                                    </p>
+                                    {itemAudit.status === 'ERRO_LEITURA_SISTEMA' && itemAudit.pesoCorrigidoDoc !== undefined && overrideWeightsMap[key || f.fileName] === undefined && (
+                                      <button
+                                        type="button"
+                                        onClick={() => setOverrideWeightsMap(prev => ({ ...prev, [key || f.fileName]: itemAudit.pesoCorrigidoDoc! }))}
+                                        className="text-[10px] font-bold px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded cursor-pointer inline-flex items-center gap-1"
+                                      >
+                                        <Check className="h-3 w-3" />
+                                        Aplicar Valor Real ({itemAudit.pesoCorrigidoDoc} t)
+                                      </button>
+                                    )}
+                                  </div>
+                                )
+                              }
+
+                              if (hasDivergence) {
+                                return (
+                                  <div className="pt-1">
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      disabled={isAuditingThis}
+                                      onClick={async () => {
+                                        const itemId = key || f.fileName
+                                        setAuditingKey(itemId)
+                                        try {
+                                          const snippet = buildAuditSnippet(f, qtdNota, key, matchInfo)
+                                          const singlePayload: WeightAuditItemInput[] = [{
+                                            id: itemId,
+                                            identificador: f.nfeData?.numero ? `NF ${f.nfeData.numero}` : f.fileName,
+                                            numeroApenas: f.nfeData?.numero || '',
+                                            serie: f.nfeData?.serie || '',
+                                            pesoMDF: overrideWeightsMap[itemId] !== undefined ? overrideWeightsMap[itemId] : qtdNota,
+                                            pesoExcel: vWeight.pesoExcel || undefined,
+                                            diferencaPeso: vWeight.diferenca || undefined,
+                                            trechoTextoDocumento: snippet,
+                                            linhaExcel: matchInfo?.row,
+                                            dadosExcelRaw: matchInfo?.rawValue,
+                                          }]
+                                          const response = await auditarDivergenciasComIA(singlePayload)
+                                          if (response.resultados.length > 0) {
+                                            setAuditResultsMap(prev => ({ ...prev, [itemId]: response.resultados[0] }))
+                                          }
+                                        } catch (err) {
+                                          console.error('Erro ao auditar nota individual:', err)
+                                        } finally {
+                                          setAuditingKey(null)
+                                        }
+                                      }}
+                                      className="h-6 px-2 text-[10px] font-semibold border-purple-300 text-purple-700 dark:border-purple-800 dark:text-purple-300 hover:bg-purple-50 dark:hover:bg-purple-950/60 cursor-pointer flex items-center gap-1"
+                                    >
+                                      {isAuditingThis ? (
+                                        <>
+                                          <Loader2 className="h-3 w-3 animate-spin text-purple-600" />
+                                          Conferindo com IA...
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Bot className="h-3 w-3 text-purple-600" />
+                                          Conferir Nota com IA
+                                        </>
+                                      )}
+                                    </Button>
+                                  </div>
+                                )
+                              }
+
+                              return null
+                            })()}
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}

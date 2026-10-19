@@ -540,8 +540,12 @@ export function parseDanfeText(text: string, defaultFileName: string = '', force
         if (nonCarrier.length > 0) {
           destCNPJ = nonCarrier[0];
         }
-      } else if (formattedCpfs && formattedCpfs.length > 0) {
-        destCNPJ = formattedCpfs[0].replace(/\D/g, '');
+      } else if (formattedCpfs && formattedCpfs.length > 0 && /(?:CNPJ\s*\/\s*CPF|\bCPF\b)/i.test(block)) {
+        // CPF só pode ser aceito quando estiver explicitamente identificado.
+        // Inscrições Estaduais concatenadas no DANFE podem formar falsos CPFs
+        // como 304.017.285-11 e nunca devem virar destinatário.
+        const explicitCpf = block.match(/\bCPF\b[^\d]{0,40}(\d{3}\.\d{3}\.\d{3}-\d{2}|\d{11})/i);
+        if (explicitCpf) destCNPJ = explicitCpf[1].replace(/\D/g, '');
       }
     }
 

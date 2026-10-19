@@ -679,12 +679,18 @@ export function verifyChaveCNPJ(
     chaveCnpj = formatCNPJ(chaveCnpjRaw)
   }
 
-  // Se o destDigits for uma Inscrição Estadual (ex: 12 dígitos como 557061801119 ou 8-10 dígitos)
-  // e não um CNPJ (14 dígitos) ou CPF (11 dígitos)
-  const isDestIE = destDigits.length === 12 || (destDigits.length >= 8 && destDigits.length <= 10) || (destDigits.length > 11 && destDigits.length < 14)
-  const isEmitIE = emitDigits.length === 12 || (emitDigits.length >= 8 && emitDigits.length <= 10) || (emitDigits.length > 11 && emitDigits.length < 14)
+  // O destinatário só pode ser identificado pelo CNPJ (14 dígitos) ou CPF (11 dígitos).
+  // Nunca aceitar IE ou qualquer outro número encontrado no bloco do destinatário:
+  // esses valores não participam da comparação com o CNPJ da chave de acesso.
+  const isDestIE = destDigits.length !== 11 && destDigits.length !== 14
+  if (isDestIE) {
+    destDigits = ""
+  }
 
-  // Se o emitDigits for uma Inscrição Estadual e não tivermos o CNPJ do emitente
+  const isEmitIE = emitDigits.length !== 11 && emitDigits.length !== 14
+
+  // Se o emitente foi extraído como IE e não temos um CNPJ válido, usamos o CNPJ
+  // da chave apenas para evitar um falso alerta no confronto com o emitente.
   if (isEmitIE && chaveCnpjRaw) {
     emitDigits = chaveCnpjRaw
   }

@@ -519,11 +519,18 @@ export function parseDanfeText(text: string, defaultFileName: string = '', force
       }
     }
 
-    // 1. Buscar prioritariamente CNPJ com rótulo explícito dentro do bloco do destinatário
-    const labelledCnpj = block.match(/(?:CNPJ\s*\/\s*CPF|CNPJ|CPF)[^\d]{0,40}(\d{2}\.?\d{3}\.?\d{3}\/?\d{4}\-?\d{2}|\d{3}\.?\d{3}\.?\d{3}\-?\d{2}|\d{14}|\d{11})/i);
-    if (labelledCnpj) {
-      const candidate = labelledCnpj[1].replace(/\D/g, '');
-      if (candidate !== destIE && candidate !== emitIE && candidate.length !== 12 && !isCarrierCnpj(candidate) && candidate !== transpBlockCNPJ) {
+    // 1. Buscar CNPJ/CPF somente quando o identificador estiver explicitamente rotulado.
+    // Nunca aceitar um número de 11 dígitos após o rótulo CNPJ: em DANFEs
+    // extraídos como texto, a IE costuma aparecer logo depois e era confundida
+    // com o CPF/CNPJ do destinatário.
+    const labelledCnpj = block.match(/\bCNPJ(?:\s*\/\s*CPF)?[^\d]{0,20}(\d{2}\.?\d{3}\.?\d{3}\/?\d{4}\-?\d{2}|\d{14})/i);
+    const labelledCpf = block.match(/\bCPF\b[^\d]{0,20}(\d{3}\.?\d{3}\.?\d{3}\-?\d{2}|\d{11})/i);
+    const labelledIdentity = labelledCnpj || labelledCpf;
+    if (labelledIdentity) {
+      const candidate = labelledIdentity[1].replace(/\D/g, '');
+      if ((candidate.length === 14 || (labelledIdentity === labelledCpf && candidate.length === 11)) &&
+          candidate !== destIE && candidate !== emitIE && candidate !== '12' &&
+          !isCarrierCnpj(candidate) && candidate !== transpBlockCNPJ) {
         destCNPJ = candidate;
       }
     }

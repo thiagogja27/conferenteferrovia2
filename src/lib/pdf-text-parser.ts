@@ -484,7 +484,7 @@ export function parseDanfeText(text: string, defaultFileName: string = '', force
     if (m) transpBlockCNPJ = m[0].replace(/\D/g, '');
   }
 
-  const recipientSectionEnd = textFiscal.search(/(?:INF\.?\s*DO\s*LOCAL\s*DE\s*RETIRADA|INF\.?\s*DO\s*LOCAL\s*DE\s*ENTREGA|LOCAL\s+DE\s+RETIRADA|LOCAL\s+DE\s+ENTREGA|DADOS\s+DO\s+LOCAL\s+DE\s+RETIRADA|DADOS\s+DO\s+LOCAL\s+DE\s+ENTREGA)/i);
+  const recipientSectionEnd = textFiscal.search(/(?:INF\.?\s*DO\s*LOCAL\s*DE\s*RETIRADA|INF\.?\s*DO\s*LOCAL\s*DE\s*ENTREGA|LOCAL\s+DE\s+RETIRADA|LOCAL\s+DE\s+ENTREGA|DADOS\s+DO\s+LOCAL\s+DE\s+RETIRADA|DADOS\s+DO\s+LOCAL\s+DE\s+ENTREGA|TRANSPORTADOR\s*\/?.{0,30}VOLUMES\s+TRANSPORTADOS|VOLUMES\s+TRANSPORTADOS|DADOS\s+DO\s+TRANSPORTE)/i);
   const recipientFiscalText = recipientSectionEnd > 0 ? textFiscal.substring(0, recipientSectionEnd) : textFiscal;
   // Em alguns DANFEs o título DESTINATÁRIO/REMETENTE é impresso na vertical.
   // O extrator pode devolver uma letra por linha, então normalizamos apenas
@@ -574,8 +574,9 @@ export function parseDanfeText(text: string, defaultFileName: string = '', force
 
   // 3. Fallback restrito EXCLUSIVAMENTE ao trecho fiscal ANTERIOR a Transportador e Dados Adicionais
   if (!destCNPJ || destCNPJ === destIE || destCNPJ === emitIE || destCNPJ.length === 12 || isCarrierCnpj(destCNPJ) || destCNPJ === transpBlockCNPJ) {
-    const textFiscalSemTransp = transpBlockMatch && transpBlockMatch.index
-      ? recipientFiscalText.substring(0, transpBlockMatch.index)
+    const transportStart = recipientFiscalText.search(/(?:TRANSPORTADOR|VOLUMES\s+TRANSPORTADOS|DADOS\s+DO\s+TRANSPORTE)/i);
+    const textFiscalSemTransp = transportStart > 0
+      ? recipientFiscalText.substring(0, transportStart)
       : recipientFiscalText;
 
     const labelledFallback = textFiscalSemTransp.match(/(?:DESTINAT[AÁ]RIO|CLIENTE)[\s\S]{1,500}?(?:CNPJ\s*\/\s*CPF|CNPJ|CPF)[^\d]{0,40}(\d{2}\.?\d{3}\.?\d{3}\/?\d{4}\-?\d{2}|\d{14})/i);

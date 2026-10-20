@@ -486,7 +486,13 @@ export function parseDanfeText(text: string, defaultFileName: string = '', force
 
   const recipientSectionEnd = textFiscal.search(/(?:INF\.?\s*DO\s*LOCAL\s*DE\s*RETIRADA|INF\.?\s*DO\s*LOCAL\s*DE\s*ENTREGA|LOCAL\s+DE\s+RETIRADA|LOCAL\s+DE\s+ENTREGA|DADOS\s+DO\s+LOCAL\s+DE\s+RETIRADA|DADOS\s+DO\s+LOCAL\s+DE\s+ENTREGA)/i);
   const recipientFiscalText = recipientSectionEnd > 0 ? textFiscal.substring(0, recipientSectionEnd) : textFiscal;
-  const destBlockMatch = recipientFiscalText.match(/(?:DESTINAT[AÁ]RIO\s*[\/\-]\s*REMETENTE|REMETENTE\s*[\/\-]\s*DESTINAT[AÁ]RIO|DADOS\s+DO\s+DESTINAT[AÁ]RIO|DADOS\s+DO\s+REMETENTE|DESTINAT[AÁ]RIO|DESTINATARIO)([\s\S]+)/i);
+  // Em alguns DANFEs o título DESTINATÁRIO/REMETENTE é impresso na vertical.
+  // O extrator pode devolver uma letra por linha, então normalizamos apenas
+  // esse rótulo antes de procurar o bloco, sem alterar os dados fiscais.
+  const recipientTextForMatching = recipientFiscalText
+    .replace(/D\s*E\s*S\s*T\s*I\s*N\s*A\s*T\s*[ÁA]\s*R\s*I\s*O\s*[\/-]?\s*R\s*E\s*M\s*E\s*T\s*E\s*N\s*T\s*E/gi, 'DESTINATÁRIO/REMETENTE')
+    .replace(/R\s*E\s*M\s*E\s*T\s*E\s*N\s*T\s*E\s*[\/-]?\s*D\s*E\s*S\s*T\s*I\s*N\s*A\s*T\s*[ÁA]\s*R\s*I\s*O/gi, 'REMETENTE/DESTINATÁRIO');
+  const destBlockMatch = recipientTextForMatching.match(/(?:DESTINAT[AÁ]RIO\s*[\/\-]\s*REMETENTE|REMETENTE\s*[\/\-]\s*DESTINAT[AÁ]RIO|DADOS\s+DO\s+DESTINAT[AÁ]RIO|DADOS\s+DO\s+REMETENTE|DESTINAT[AÁ]RIO|DESTINATARIO)([\s\S]+)/i);
   if (destBlockMatch) {
     let block = destBlockMatch[1];
     // O DANFE pode trazer, logo após o destinatário, os blocos

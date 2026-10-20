@@ -463,11 +463,24 @@ export function ChaveDestinatarioDashboard({
   const handleExportExcel = () => {
     if (items.length === 0) return
 
-    const rows = filteredItems.map((item) => ({
+    const rows = filteredItems.map((item) => {
+      // Recalcula o status no momento da exportação usando somente o CNPJ
+      // oficial da chave e o CNPJ fiscal do destinatário. Isso evita exportar
+      // o status antigo calculado antes da normalização do PDF/cadastro.
+      const chaveCnpj = item.chaveCnpjRaw.replace(/\D/g, '')
+      const destinatarioCnpj = item.destCNPJ.replace(/\D/g, '')
+      const exportConfronto =
+        chaveCnpj.length === 14 && destinatarioCnpj.length === 14
+          ? chaveCnpj === destinatarioCnpj
+            ? 'IGUAIS'
+            : 'DIVERGENTES'
+          : 'NÃO INFORMADO'
+
+      return {
       Status:
-        item.confronto === 'DIVERGENTES'
+        exportConfronto === 'DIVERGENTES'
           ? 'DIVERGENTE (Chave ≠ Destinatário)'
-          : item.confronto === 'IGUAIS'
+          : exportConfronto === 'IGUAIS'
           ? 'CONFORME (Chave = Destinatário)'
           : 'NÃO INFORMADO',
       'Número NF': item.numero,
@@ -486,7 +499,8 @@ export function ChaveDestinatarioDashboard({
       'Chave Pertence ao Emitente?': item.matchesEmitente ? 'SIM' : 'NÃO',
       'Diagnóstico / Detalhes': item.statusDetails,
       Arquivo: item.fileName,
-    }))
+      }
+    })
 
     const wb = XLSX.utils.book_new()
     const ws = XLSX.utils.json_to_sheet(rows)

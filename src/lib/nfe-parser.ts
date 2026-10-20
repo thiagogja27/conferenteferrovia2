@@ -695,20 +695,10 @@ export function verifyChaveCNPJ(
     emitDigits = chaveCnpjRaw
   }
 
-  const matchesEmitente = !!(
-    chaveCnpjRaw &&
-    emitDigits &&
-    (chaveCnpjRaw === emitDigits ||
-      emitDigits.includes(chaveCnpjRaw) ||
-      (chaveCnpjRaw.length === 14 && emitDigits.length === 14 && chaveCnpjRaw.slice(0, 8) === emitDigits.slice(0, 8)))
-  )
-  const matchesDestinatario = !!(
-    chaveCnpjRaw &&
-    destDigits &&
-    (chaveCnpjRaw === destDigits ||
-      destDigits.includes(chaveCnpjRaw) ||
-      (chaveCnpjRaw.length === 14 && destDigits.length === 14 && chaveCnpjRaw.slice(0, 8) === destDigits.slice(0, 8)))
-  )
+  // A chave identifica uma filial específica. A raiz do CNPJ não é suficiente:
+  // matriz e filiais devem ser tratadas como divergentes quando os 14 dígitos diferem.
+  const matchesEmitente = !!(chaveCnpjRaw && emitDigits && chaveCnpjRaw === emitDigits)
+  const matchesDestinatario = !!(chaveCnpjRaw && destDigits && chaveCnpjRaw === destDigits)
 
   const confrontoChaveXDest: "IGUAIS" | "DIVERGENTES" | "NÃO INFORMADO" =
     !chaveCnpjRaw || !destDigits
@@ -741,11 +731,7 @@ export function verifyChaveCNPJ(
     details = `CNPJ da Chave (${chaveCnpj}) extraído. Destinatário sem CNPJ/CPF informado.`
   } else if (matchesDestinatario) {
     statusLabel = "IGUAIS (Chave = Destinatário)"
-    if (chaveCnpjRaw !== destDigits && chaveCnpjRaw.slice(0, 8) === destDigits.slice(0, 8)) {
-      details = `O CNPJ na Chave (${chaveCnpj}) confere com a mesma empresa/grupo do Destinatário (${formattedDest} - Matriz/Filial).`
-    } else {
-      details = `O CNPJ na Chave (${chaveCnpj}) é IGUAL ao CNPJ do Destinatário (${formattedDest}).`
-    }
+    details = `O CNPJ na Chave (${chaveCnpj}) é IGUAL ao CNPJ do Destinatário (${formattedDest}).`
   } else {
     // Quando o CNPJ da Chave NÃO bate com o Destinatário: É DIVERGENTE!
     statusLabel = "DIVERGENTE (Chave ≠ Destinatário)"

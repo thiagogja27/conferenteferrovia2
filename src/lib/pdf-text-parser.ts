@@ -487,7 +487,11 @@ export function parseDanfeText(text: string, defaultFileName: string = '', force
   const destBlockMatch = textFiscal.match(/(?:DESTINAT[AÁ]RIO\s*[\/\-]\s*REMETENTE|REMETENTE\s*[\/\-]\s*DESTINAT[AÁ]RIO|DADOS\s+DO\s+DESTINAT[AÁ]RIO|DADOS\s+DO\s+REMETENTE|DESTINAT[AÁ]RIO|DESTINATARIO)([\s\S]+)/i);
   if (destBlockMatch) {
     let block = destBlockMatch[1];
-    const endBlockIdx = block.search(/(?:TRANSPORTADOR|DADOS\s+DO\s+TRANSPORTE|VOLUMES\s+TRANSPORTADOS|DADOS\s+DOS\s+PRODUTOS|DADOS\s+DO\s+PRODUTO)/i);
+    // O DANFE pode trazer, logo após o destinatário, os blocos
+    // "INF. DO LOCAL DE RETIRADA" e "INF. DO LOCAL DE ENTREGA".
+    // Eles nunca fazem parte do destinatário fiscal e seus CNPJs não podem
+    // participar desta comparação.
+    const endBlockIdx = block.search(/(?:INF\.?\s*DO\s*LOCAL\s*DE\s*RETIRADA|INF\.?\s*DO\s*LOCAL\s*DE\s*ENTREGA|INFORMA[ÇC][ÕO]ES\s+COMPLEMENTARES|DADOS\s+ADICIONAIS|TRANSPORTADOR|DADOS\s+DO\s+TRANSPORTE|VOLUMES\s+TRANSPORTADOS|DADOS\s+DOS\s+PRODUTOS|DADOS\s+DO\s+PRODUTO)/i);
     if (endBlockIdx > 0) {
       block = block.substring(0, endBlockIdx);
     }

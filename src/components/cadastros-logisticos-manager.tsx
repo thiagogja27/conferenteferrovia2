@@ -29,6 +29,9 @@ import {
   RefreshCw,
   Tag,
   MapPin,
+  Download,
+  Sparkles,
+  ClipboardList,
 } from 'lucide-react'
 import {
   getAllDestinatarios,
@@ -47,6 +50,7 @@ import {
   type ContratoDestinatario,
 } from '@/lib/cadastros-logisticos-service'
 import { formatCNPJ } from '@/lib/destinatario-utils'
+import { clearRecipientEnrichmentLog, getRecipientEnrichmentLog, type RecipientEnrichmentLog } from '@/lib/cadastro-recipient-enrichment'
 
 const normalizeSearchText = (value: string) =>
   value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase()
@@ -114,6 +118,7 @@ export function CadastrosLogisticosManager({ onNotify }: CadastrosLogisticosMana
   const [destinatarios, setDestinatarios] = useState<CadastroDestinatario[]>([])
   const [transbordos, setTransbordos] = useState<CadastroTransbordo[]>([])
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [enrichmentLog, setEnrichmentLog] = useState<RecipientEnrichmentLog[]>([])
 
   // Modais de Criação / Edição
   const [isDestModalOpen, setIsDestModalOpen] = useState(false)
@@ -150,10 +155,16 @@ export function CadastrosLogisticosManager({ onNotify }: CadastrosLogisticosMana
 
   useEffect(() => {
     reloadData()
+    setEnrichmentLog(getRecipientEnrichmentLog())
     const unsubscribe = subscribeCadastrosChanges(() => {
       reloadData()
     })
-    return () => unsubscribe()
+    const handleEnrichment = () => setEnrichmentLog(getRecipientEnrichmentLog())
+    window.addEventListener('recipient_enrichment_registered', handleEnrichment)
+    return () => {
+      unsubscribe()
+      window.removeEventListener('recipient_enrichment_registered', handleEnrichment)
+    }
   }, [])
 
   // Limpa formulário de Destinatário
@@ -492,6 +503,34 @@ export function CadastrosLogisticosManager({ onNotify }: CadastrosLogisticosMana
     }
   }
 
+  const escapeCsv = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`
+
+  const downloadCsv = (filename: string, rows: string[][]) => {
+    const content = '\uFEFF' + rows.map((row) => row.map(escapeCsv).join(';')).join('\n')
+    const url = URL.createObjectURL(new Blob([content], { type: 'text/csv;charset=utf-8' }))
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = filename
+    anchor.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const handleExportCadastros = () => {
+    const rows = [
+      ['Tipo', 'Nome', 'CNPJ', 'CNPJs adicionais', 'Cidade', 'UF', 'Operadora', 'Origem', 'Observações'],
+      ...destinatarios.map((item) => ['Destinatário', item.nome, item.cnpjPrincipal, (item.cnpjsAdicionais || []).join(', '), item.cidade || '', item.uf || '', '', item.isSistema ? 'Sistema' : 'Personalizado', item.observacoes || '']),
+      ...transbordos.map((item) => ['Transbordo', item.nome, item.cnpj || '', '', item.cidade || '', item.uf || '', item.operadora || '', item.isSistema ? 'Sistema' : 'Personalizado', item.observacoes || '']),
+    ]
+    downloadCsv(`cadastros-logisticos-${new Date().toISOString().slice(0, 10)}.csv`, rows)
+  }
+
+  const handleExportEnrichmentLog = () => {
+    downloadCsv(`associacoes-automaticas-${new Date().toISOString().slice(0, 10)}.csv`, [
+      ['Data', 'CNPJ', 'Nome anterior', 'Nome associado pela NF-e', 'Origem'],
+      ...enrichmentLog.map((entry) => [new Date(entry.ocorridoEm).toLocaleString('pt-BR'), formatCNPJ(entry.cnpj), entry.nomeAnterior, entry.nomeAssociado, entry.origem]),
+    ])
+  }
+
   // Copiar CNPJ
   const handleCopy = (text: string, id: string) => {
     navigator.clipboard.writeText(text)
@@ -669,6 +708,12 @@ export function CadastrosLogisticosManager({ onNotify }: CadastrosLogisticosMana
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          <Button type="button" size="sm" variant="outline" onClick={handleExportCadastros} className="text-xs h-9 px-2.5 cursor-pointer">
+            <Download className="h-4 w-4 mr-1.5" /> Exportar cadastros
+          </Button>
+          <Button type="button" size="sm" variant="outline" onClick={handleExportEnrichmentLog} disabled={enrichmentLog.length === 0} className="text-xs h-9 px-2.5 cursor-pointer">
+            <ClipboardList className="h-4 w-4 mr-1.5" /> Exportar associações ({enrichmentLog.length})
+          </Button>
           {activeSubTab === 'transbordos' && (
             <Button
               type="button"
@@ -692,6 +737,30 @@ export function CadastrosLogisticosManager({ onNotify }: CadastrosLogisticosMana
           </Button>
         </div>
       </div>
+
+      {enrichmentLog.length > 0 && (
+        <div className="rounded-2xl border border-violet-200 bg-violet-50/70 dark:border-violet-900 dark:bg-violet-950/20 p-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-violet-600" />
+              <div>
+                <p className="text-sm font-bold text-violet-950 dark:text-violet-100">Associações automáticas pela NF-e</p>
+                <p className="text-xs text-violet-800/80 dark:text-violet-300">O sistema adicionou nomes a cadastros que estavam sem nomenclatura.</p>
+              </div>
+            </div>
+            <Button type="button" variant="ghost" size="sm" onClick={() => { clearRecipientEnrichmentLog(); setEnrichmentLog([]) }} className="text-xs text-violet-700">Limpar histórico</Button>
+          </div>
+          <div className="max-h-48 overflow-auto space-y-1">
+            {enrichmentLog.slice(0, 10).map((entry) => (
+              <div key={entry.id} className="grid grid-cols-1 sm:grid-cols-[145px_170px_1fr] gap-1 sm:gap-3 rounded-lg bg-white/70 dark:bg-zinc-900/50 px-3 py-2 text-xs">
+                <span className="text-violet-700">{new Date(entry.ocorridoEm).toLocaleString('pt-BR')}</span>
+                <span className="font-mono">{formatCNPJ(entry.cnpj)}</span>
+                <span><strong>{entry.nomeAssociado}</strong> <span className="text-zinc-500">foi associado pela NF-e</span></span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Sub-Abas: Destinatários vs Transbordos */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-200 dark:border-zinc-800 pb-3">

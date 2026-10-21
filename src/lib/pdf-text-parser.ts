@@ -486,8 +486,9 @@ export function parseDanfeText(text: string, defaultFileName: string = '', force
 
   const recipientSectionEnd = textFiscal.search(/(?:INF\.?\s*DO\s*LOCAL\s*DE\s*RETIRADA|INF\.?\s*DO\s*LOCAL\s*DE\s*ENTREGA|LOCAL\s+DE\s+RETIRADA|LOCAL\s+DE\s+ENTREGA|DADOS\s+DO\s+LOCAL\s+DE\s+RETIRADA|DADOS\s+DO\s+LOCAL\s+DE\s+ENTREGA|TRANSPORTADOR\s*\/?.{0,30}VOLUMES\s+TRANSPORTADOS|VOLUMES\s+TRANSPORTADOS|DADOS\s+DO\s+TRANSPORTE)/i);
   const recipientFiscalText = recipientSectionEnd > 0 ? textFiscal.substring(0, recipientSectionEnd) : textFiscal;
-  // O CNPJ da chave identifica o emitente da NF-e, não o destinatário.
-  // Portanto ele nunca deve ser usado para preencher o destinatário.
+  // A chave de acesso é a fonte de verdade: quando o CNPJ dela aparecer no
+  // bloco fiscal da nota, ele deve ser escolhido antes de qualquer outro CNPJ.
+  const chaveDestinatarioCnpj = chave.length === 44 ? chave.substring(6, 20) : '';
   // Em alguns DANFEs o título DESTINATÁRIO/REMETENTE é impresso na vertical.
   // O extrator pode devolver uma letra por linha, então normalizamos apenas
   // esse rótulo antes de procurar o bloco, sem alterar os dados fiscais.
@@ -548,6 +549,10 @@ export function parseDanfeText(text: string, defaultFileName: string = '', force
         destCNPJ = candidate;
       }
     }
+    if (chaveDestinatarioCnpj && new RegExp(`(?:\\D|^)${chaveDestinatarioCnpj.slice(0, 2)}\\D?${chaveDestinatarioCnpj.slice(2, 5)}\\D?${chaveDestinatarioCnpj.slice(5, 8)}\\D?${chaveDestinatarioCnpj.slice(8, 12)}\\D?${chaveDestinatarioCnpj.slice(12)}(?:\\D|$)`).test(block)) {
+      destCNPJ = chaveDestinatarioCnpj;
+    }
+
     // 2. Se não achou com rótulo, buscar CNPJs formatados no bloco
     if (!destCNPJ) {
       const formattedCnpjs = block.match(/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/g);
@@ -558,7 +563,9 @@ export function parseDanfeText(text: string, defaultFileName: string = '', force
           .map(c => c.replace(/\D/g, ''))
           .filter(c => !isCarrierCnpj(c) && c !== emitIE && c !== destIE && c !== transpBlockCNPJ);
         if (nonCarrier.length > 0) {
-          destCNPJ = nonCarrier[0];
+          destCNPJ = chaveDestinatarioCnpj && nonCarrier.includes(chaveDestinatarioCnpj)
+            ? chaveDestinatarioCnpj
+            : nonCarrier[0];
         }
       } else if (formattedCpfs && formattedCpfs.length > 0 && /(?:CNPJ\s*\/\s*CPF|\bCPF\b)/i.test(block)) {
         // CPF só pode ser aceito quando estiver explicitamente identificado.
@@ -597,7 +604,9 @@ export function parseDanfeText(text: string, defaultFileName: string = '', force
           .filter(c => !isCarrierCnpj(c) && c !== emitIE && c !== destIE && c !== transpBlockCNPJ && c.length === 14);
         if (candidates.length > 1) {
           const diffFromEmit = candidates.filter(c => c !== emitCNPJRaw);
-          destCNPJ = diffFromEmit.length > 0 ? diffFromEmit[0] : candidates[0];
+          destCNPJ = chaveDestinatarioCnpj && candidates.includes(chaveDestinatarioCnpj)
+            ? chaveDestinatarioCnpj
+            : diffFromEmit.length > 0 ? diffFromEmit[0] : candidates[0];
         } else if (candidates.length === 1) {
           destCNPJ = candidates[0];
         }

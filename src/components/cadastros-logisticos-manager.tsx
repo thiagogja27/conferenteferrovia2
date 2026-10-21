@@ -517,9 +517,21 @@ export function CadastrosLogisticosManager({ onNotify }: CadastrosLogisticosMana
 
   const handleExportCadastros = () => {
     const rows = [
-      ['Tipo', 'Nome', 'CNPJ', 'CNPJs adicionais', 'Cidade', 'UF', 'Operadora', 'Origem', 'Observações'],
-      ...destinatarios.map((item) => ['Destinatário', item.nome, item.cnpjPrincipal, (item.cnpjsAdicionais || []).join(', '), item.cidade || '', item.uf || '', '', item.isSistema ? 'Sistema' : 'Personalizado', item.observacoes || '']),
-      ...transbordos.map((item) => ['Transbordo', item.nome, item.cnpj || '', '', item.cidade || '', item.uf || '', item.operadora || '', item.isSistema ? 'Sistema' : 'Personalizado', item.observacoes || '']),
+      ['Destinatário', 'CNPJ/CPF', 'Nomenclatura destinatário', 'Nomenclatura remetente', 'Contrato'],
+      ...destinatarios.map((item) => [
+        item.nome || '',
+        item.cnpjPrincipal || '',
+        item.nomenclatura || '',
+        item.nomenclaturaRemetente || '',
+        item.contrato || '',
+      ]),
+      ...transbordos.map((item) => [
+        `${item.nome || ''} (Transbordo)`,
+        item.cnpj || '',
+        '',
+        '',
+        '',
+      ]),
     ]
     downloadCsv(`cadastros-logisticos-${new Date().toISOString().slice(0, 10)}.csv`, rows)
   }

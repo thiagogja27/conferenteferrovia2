@@ -1,6 +1,5 @@
 import express from "express";
 import path from "path";
-import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { PDFParse } from "pdf-parse";
@@ -561,43 +560,31 @@ app.post("/api/gemini/audit-logistics", async (req, res) => {
         const response = await ai.models.generateContent({
           model: "gemini-3.7-flash",
           contents: `Você é um Auditor Sênior Especialista em Logística Portuária, Ferroviária e Fiscal de DANFE/NF-e (Exportação de Açúcar, Grãos, Soja, Milho, Farelo e Cargas Industriais).
-Sua missão fundamental é analisar as notas fiscais onde TERMINAL DE ENTREGA ou TRANSBORDO estão "Não Informado" e ENCONTRAR OS VALORES REAIS declarados no texto da DANFE/Informações Complementares para ajustar o Dashboard.
+Sua missão fundamental é analisar as notas fiscais onde TRANSBORDO, PRODUTO ou LOCAL DE RETIRADA estão "Não Informado" e ENCONTRAR OS VALORES REAIS declarados no texto da DANFE/Informações Complementares para ajustar o Dashboard.
+
+ATENÇÃO IMPORTANTE:
+O TERMINAL DE ENTREGA É EXTRAÍDO 100% MECANICAMENTE PELO SISTEMA E NÃO DEVE SER CLASSIFICADO NEM ALTERADO PELA AUDITORIA DA IA.
 
 =======================================================
-REGRAS E PADRÕES DE MAPEAMENTO LOGÍSTICO:
+REGRAS E PADRÕES DE MAPEAMENTO DE TRANSBORDO:
 =======================================================
-1) TERMINAIS DE ENTREGA (Especialmente Porto de Santos e Terminais de Exportação):
-   - "TEAG - TERMINAL DE ACUCAR DO GUARUJA" (se mencionar TEAG, Term. Açúcar Guarujá, Terminal Exportação Açúcar)
-   - "TEG - TERMINAL EXPORTADOR DO GUARUJA" (se mencionar TEG, Terminal Exportadores Grande, Term. Exportador Guarujá)
-   - "CLI - CORREDOR LOGÍSTICA INTEGRADA" (se mencionar CLI, Corredor Logístico Integrado, Termares)
-   - "TGG - TERMINAL DE GRAOS DO GUARUJA" (se mencionar TGG, Grãos do Guarujá)
-   - "TERMINAL 124" (se mencionar T-124, T124, Terminal 124)
-   - "SANTOS BRASIL" (se mencionar Santos Brasil, Tecon Santos)
-   - "DP WORLD SANTOS" (se mencionar DP World, Embraport)
-   - "BTP - BRASIL TERMINAL PORTUARIO" (se mencionar BTP)
-   - "ECOPORTO SANTOS" (se mencionar Ecoporto)
-   - "TIPLAM - TERMINAL INTEGRADO" (se mencionar TIPLAM, VLI Tiplam)
-   - "TERMINAL RUMO" (se mencionar Rumo, Terminal Rumo Malha)
-   - "TERMINAL VLI" (se mencionar VLI)
+- "ITURAMA" (se mencionar Iturama, Pátio Iturama)
+- "PRADOPOLIS" (se mencionar Pradópolis, Pradopolis, ZXE, Usina São Martinho Pradópolis)
+- "ALTO TAQUARI" ou "NOVA AGRI - ALTO TAQUARI" (se mencionar Alto Taquari, Nova Agri)
+- "RONDONOPOLIS (RUMO)" (se mencionar Rondonópolis, Rondonopolis, Malha Norte)
+- "RIO VERDE" (se mencionar Rio Verde)
+- "ARAGUARI (VLI)" (se mencionar Araguari)
+- "UBERABA" (se mencionar Uberaba, TIUB)
+- "PEDERNEIRAS (RUMO)" (se mencionar Pederneiras)
+- "GUARA" (se mencionar Guará, Guara)
+- "UBERLANDIA", "SAO SIMAO", "CHAPADAO DO SUL", "INOCENCIA", "ITIQUIRA", "RIO PRETO"
 
-2) TRANSBORDOS E PÁTIOS RODOFERROVIÁRIOS:
-   - "ITURAMA" (se mencionar Iturama, Pátio Iturama)
-   - "PRADOPOLIS" (se mencionar Pradópolis, Pradopolis, ZXE, Usina São Martinho Pradópolis)
-   - "ALTO TAQUARI" ou "NOVA AGRI - ALTO TAQUARI" (se mencionar Alto Taquari, Nova Agri)
-   - "RONDONOPOLIS (RUMO)" (se mencionar Rondonópolis, Rondonopolis, Malha Norte)
-   - "RIO VERDE" (se mencionar Rio Verde)
-   - "ARAGUARI (VLI)" (se mencionar Araguari)
-   - "UBERABA" (se mencionar Uberaba, TIUB)
-   - "PEDERNEIRAS (RUMO)" (se mencionar Pederneiras)
-   - "GUARA" (se mencionar Guará, Guara)
-   - "UBERLANDIA", "SAO SIMAO", "CHAPADAO DO SUL", "INOCENCIA", "ITIQUIRA", "RIO PRETO"
-
-Analise cada nota com atenção aos campos infCpl e trechoDocumentoOriginal. Se encontrar dados novos para preencher ou corrigir, informe os valores.
+Analise cada nota com atenção aos campos infCpl e trechoDocumentoOriginal. Se encontrar dados de transbordo, produto ou retirada, informe os valores.
 
 Dados a auditar:
 ${JSON.stringify(promptPayload, null, 2)}`,
           config: {
-            systemInstruction: "Você é um auditor logístico e fiscal analítico. Localize terminais e transbordos declarados no texto do documento. Não sugira destinatários. Retorne estritamente um array JSON com todos os itens analisados.",
+            systemInstruction: "Você é um auditor logístico e fiscal analítico. Localize transbordos, produtos e locais de retirada declarados no texto do documento. O terminal de entrega é extraído de forma 100% mecânica e não deve ser alterado. Retorne estritamente um array JSON com todos os itens analisados.",
             responseMimeType: "application/json",
             responseSchema: {
               type: Type.ARRAY,
@@ -605,7 +592,7 @@ ${JSON.stringify(promptPayload, null, 2)}`,
                 type: Type.OBJECT,
                 properties: {
                   id: { type: Type.STRING },
-                  terminalCorrigido: { type: Type.STRING, description: "Nome normalizado do Terminal de Entrega identificado no documento, ou vazio se não houver" },
+                  terminalCorrigido: { type: Type.STRING, description: "Manter vazio pois o terminal é 100% mecânico" },
                   transbordoCorrigido: { type: Type.STRING, description: "Nome do Transbordo/Pátio identificado no documento, ou vazio se não houver" },
                   produtoCorrigido: { type: Type.STRING, description: "Nome do Produto identificado no documento, ou vazio se não houver" },
                   retiradaCorrigida: { type: Type.STRING, description: "Local de Retirada identificado no documento, ou vazio se não houver" },
@@ -642,10 +629,7 @@ ${JSON.stringify(promptPayload, null, 2)}`,
     const resultados = items.map(it => {
       const aiResult = allAiParsedResults.find((r: any) => r.id === it.id);
       if (aiResult) {
-        const camposAjustados: Array<'terminal' | 'transbordo' | 'destinatario' | 'retirada' | 'produto'> = [];
-        if (aiResult.terminalCorrigido && (!it.terminal || /N[AÃ]O\s*INFORMADO/i.test(it.terminal))) {
-          camposAjustados.push('terminal');
-        }
+        const camposAjustados: Array<'transbordo' | 'destinatario' | 'retirada' | 'produto'> = [];
         if (aiResult.transbordoCorrigido && (!it.transbordo || /N[AÃ]O\s*INFORMADO/i.test(it.transbordo))) {
           camposAjustados.push('transbordo');
         }
@@ -657,7 +641,8 @@ ${JSON.stringify(promptPayload, null, 2)}`,
         return {
           id: it.id,
           numero: it.numero,
-          terminalCorrigido: aiResult.terminalCorrigido || it.terminal,
+          // Terminal é 100% mecânico e não é sobrescrito pela IA
+          terminalCorrigido: it.terminal,
           transbordoCorrigido: aiResult.transbordoCorrigido || it.transbordo,
           destinatarioCorrigido: it.destNome,
           retiradaCorrigida: aiResult.retiradaCorrigida || it.retirada,
@@ -712,50 +697,16 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 // Configurar o Vite como middleware para servir a aplicação React em desenvolvimento
 // Em produção, servirá os arquivos estáticos compilados na pasta 'dist'
 async function startServer() {
-  const distPath = path.join(process.cwd(), "dist");
-
-  // Servir arquivos estáticos de compilações anteriores se existirem (evita erro com bundles cacheados)
-  if (fs.existsSync(distPath)) {
-    app.use(express.static(distPath, { index: false }));
-  }
-
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
-      appType: "custom",
+      appType: "spa",
     });
     app.use(vite.middlewares);
-
-    // Servir HTML para requisições de navegação SPA, mas retornar 404 para assets não encontrados
-    app.use("*", async (req, res, next) => {
-      const url = req.originalUrl.split("?")[0];
-      if (
-        url.startsWith("/api/") ||
-        /\.(js|mjs|cjs|ts|tsx|css|json|map|wasm|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot)$/i.test(url)
-      ) {
-        return res.status(404).type("text/plain").send("Not Found");
-      }
-
-      try {
-        const indexPath = path.resolve(process.cwd(), "index.html");
-        let template = fs.readFileSync(indexPath, "utf-8");
-        template = await vite.transformIndexHtml(req.originalUrl, template);
-        res.status(200).set({ "Content-Type": "text/html" }).end(template);
-      } catch (e: any) {
-        vite.ssrFixStacktrace(e);
-        next(e);
-      }
-    });
   } else {
+    const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
-      const url = req.originalUrl.split("?")[0];
-      if (
-        url.startsWith("/api/") ||
-        /\.(js|mjs|cjs|ts|tsx|css|json|map|wasm|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot)$/i.test(url)
-      ) {
-        return res.status(404).type("text/plain").send("Not Found");
-      }
       res.sendFile(path.join(distPath, "index.html"));
     });
   }

@@ -37,12 +37,6 @@ import {
   Square,
   Building2,
   Check,
-  PiggyBank,
-  TrendingDown,
-  Sliders,
-  ChevronDown,
-  ChevronUp,
-  Copy,
 } from 'lucide-react'
 import {
   fetchDatabaseStorageStats,
@@ -60,16 +54,9 @@ import {
   purgeSelectedNodes,
   purgeAllTelemetryColumns,
   purgeEntireVlicTelemetryRoot,
-  purgeAllResidualKeysAndTitles,
-  purgeDatabasePreservingOnlyUsersAndDepartments,
-  getDatabaseEconomySettings,
-  saveDatabaseEconomySettings,
-  applyDatabaseEconomyNow,
   type DatabaseStorageStats,
   type StorageNodeMetric,
-  type DatabaseEconomySettings,
 } from '@/lib/database-optimization-service'
-import { clearConferenceDashboardHistory } from '@/lib/conference-dashboard-sync'
 
 interface DatabaseStorageManagerProps {
   onNotify?: (message: string, type?: 'success' | 'warning' | 'error' | 'info') => void
@@ -95,50 +82,6 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
   // Modal de Confirmação de Limpeza Total Raiz
   const [isDangerModalOpen, setIsDangerModalOpen] = useState(false)
   const [dangerConfirmText, setDangerConfirmText] = useState('')
-
-  // Modal de Confirmação de Wipe Total Mantendo Apenas Usuários e Departamentos
-  const [isWipeKeepUsersModalOpen, setIsWipeKeepUsersModalOpen] = useState(false)
-  const [wipeConfirmText, setWipeConfirmText] = useState('')
-
-  // Modal e controle de apagar títulos e chaves residuais
-  const [isPurgeResidualKeysModalOpen, setIsPurgeResidualKeysModalOpen] = useState(false)
-  const [hideEmptyColumns, setHideEmptyColumns] = useState(false)
-  const [copiedRules, setCopiedRules] = useState(false)
-  const [rulesTab, setRulesTab] = useState<'rbac' | 'open'>('rbac')
-
-  // Configurações de Economia e Redução de Gastos
-  const [economySettings, setEconomySettings] = useState<DatabaseEconomySettings>(() => getDatabaseEconomySettings())
-  const [isApplyingEconomy, setIsApplyingEconomy] = useState(false)
-  const [showEconomyDetails, setShowEconomyDetails] = useState(false)
-
-  const handleUpdateEconomyMode = (mode: 'extreme' | 'standard' | 'custom') => {
-    const updated = saveDatabaseEconomySettings({
-      economyMode: mode,
-      maxConferenceMirrors: mode === 'extreme' ? 1 : mode === 'standard' ? 3 : economySettings.maxConferenceMirrors,
-      maxInputFilesHistory: mode === 'extreme' ? 30 : mode === 'standard' ? 100 : economySettings.maxInputFilesHistory,
-      maxActivitiesHistory: mode === 'extreme' ? 30 : mode === 'standard' ? 100 : economySettings.maxActivitiesHistory,
-      slimConferencePayload: true,
-      autoPruningEnabled: true,
-    })
-    setEconomySettings(updated)
-    onNotify?.(
-      `Modo Econômico configurado para: ${mode === 'extreme' ? 'Extremo (Custo Zero)' : mode === 'standard' ? 'Padrão Otimizado' : 'Personalizado'}.`,
-      'info'
-    )
-  }
-
-  const handleApplyEconomyNow = async () => {
-    setIsApplyingEconomy(true)
-    try {
-      const res = await applyDatabaseEconomyNow()
-      await loadStats()
-      onNotify?.(res.summary, 'success')
-    } catch (err: any) {
-      onNotify?.(`Erro ao aplicar modo econômico: ${err?.message || 'Falha na operação.'}`, 'error')
-    } finally {
-      setIsApplyingEconomy(false)
-    }
-  }
 
   const loadStats = async () => {
     setIsLoading(true)
@@ -193,9 +136,6 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
     const { path, label } = nodeToPurge
     setActionLoadingKey(path)
     try {
-      if (path.includes('conference_dashboards') || path.includes('latest_conference_dashboard')) {
-        await clearConferenceDashboardHistory()
-      }
       const res = await purgeSingleNode(path)
       await loadStats()
       onNotify?.(`Coluna "${label}" limpa com sucesso! ${res.freedBytes ? `${formatBytes(res.freedBytes)} liberados.` : ''}`, 'success')
@@ -212,9 +152,6 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
     if (selectedColumns.length === 0) return
     setIsOptimizing(true)
     try {
-      if (selectedColumns.some((p) => p.includes('conference_dashboards') || p.includes('latest_conference_dashboard'))) {
-        await clearConferenceDashboardHistory()
-      }
       const res = await purgeSelectedNodes(selectedColumns)
       await loadStats()
       setSelectedColumns([])
@@ -231,7 +168,6 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
     setIsOptimizing(true)
     setIsBulkPurgeModalOpen(false)
     try {
-      await clearConferenceDashboardHistory()
       const res = await purgeAllTelemetryColumns(preserveUsersInBulk)
       await loadStats()
       setSelectedColumns([])
@@ -255,54 +191,12 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
     setDangerConfirmText('')
 
     try {
-      await clearConferenceDashboardHistory()
       const res = await purgeEntireVlicTelemetryRoot()
       await loadStats()
       setSelectedColumns([])
       onNotify?.(res.summary, 'success')
     } catch (err: any) {
       onNotify?.(`Erro ao limpar telemetria: ${err?.message || 'Falha na exclusão.'}`, 'error')
-    } finally {
-      setIsOptimizing(false)
-    }
-  }
-
-  // Apagar todos os títulos e chaves residuais que continuam no banco
-  const handlePurgeResidualKeys = async () => {
-    setIsOptimizing(true)
-    setIsPurgeResidualKeysModalOpen(false)
-    try {
-      await clearConferenceDashboardHistory()
-      const res = await purgeAllResidualKeysAndTitles()
-      await loadStats()
-      setSelectedColumns([])
-      onNotify?.(res.summary, 'success')
-    } catch (err: any) {
-      onNotify?.(`Erro ao apagar títulos e chaves do banco: ${err?.message || 'Falha na exclusão.'}`, 'error')
-    } finally {
-      setIsOptimizing(false)
-    }
-  }
-
-  // Wipe Total do Banco Mantendo Exclusivamente Usuários (users) e Departamentos (user_departments)
-  const handleWipeDatabasePreservingUsers = async () => {
-    if (wipeConfirmText.trim().toUpperCase() !== 'LIMPAR TUDO') {
-      onNotify?.('Digite exatamente "LIMPAR TUDO" para confirmar a exclusão.', 'warning')
-      return
-    }
-
-    setIsOptimizing(true)
-    setIsWipeKeepUsersModalOpen(false)
-    setWipeConfirmText('')
-
-    try {
-      await clearConferenceDashboardHistory()
-      const res = await purgeDatabasePreservingOnlyUsersAndDepartments()
-      await loadStats()
-      setSelectedColumns([])
-      onNotify?.(res.summary, 'success')
-    } catch (err: any) {
-      onNotify?.(`Erro ao limpar banco: ${err?.message || 'Falha na exclusão.'}`, 'error')
     } finally {
       setIsOptimizing(false)
     }
@@ -482,30 +376,6 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
           <Button
             type="button"
             size="sm"
-            onClick={() => setIsWipeKeepUsersModalOpen(true)}
-            disabled={isOptimizing}
-            className="text-xs font-bold bg-violet-700 hover:bg-violet-800 text-white cursor-pointer shadow-xs flex items-center gap-1.5 h-9 px-3.5"
-            title="Apaga todo o banco mantendo exclusivamente os nós de usuários (users) e departamentos (user_departments)"
-          >
-            <Trash2 className="h-4 w-4" />
-            Apagar Banco (Manter Usuários)
-          </Button>
-
-          <Button
-            type="button"
-            size="sm"
-            onClick={() => setIsPurgeResidualKeysModalOpen(true)}
-            disabled={isOptimizing}
-            className="text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white cursor-pointer shadow-xs flex items-center gap-1.5 h-9 px-3.5"
-            title="Remove os títulos e chaves residuais que continuam no banco de dados"
-          >
-            <Trash2 className="h-4 w-4" />
-            Apagar Títulos e Chaves Residuais
-          </Button>
-
-          <Button
-            type="button"
-            size="sm"
             onClick={() => setIsBulkPurgeModalOpen(true)}
             disabled={isOptimizing}
             className="text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white cursor-pointer shadow-xs flex items-center gap-1.5 h-9 px-3.5"
@@ -632,235 +502,47 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
         </Card>
       </div>
 
-      {/* PAINEL DE ESTRATÉGIA DE REDUÇÃO DE GASTOS & MODO ECONÔMICO AUTOMÁTICO */}
-      <Card className="shadow-xs border-2 border-emerald-300 dark:border-emerald-800/80 bg-gradient-to-br from-emerald-50/60 via-white to-teal-50/40 dark:from-emerald-950/20 dark:via-zinc-900/60 dark:to-teal-950/20 overflow-hidden">
-        <CardHeader className="p-4 sm:p-5 pb-3 border-b border-emerald-100 dark:border-emerald-900/50">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="p-2.5 rounded-xl bg-emerald-600 text-white shrink-0 shadow-xs">
-                <PiggyBank className="h-5 w-5" />
-              </div>
-              <div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <CardTitle className="text-sm font-bold text-zinc-900 dark:text-zinc-100">
-                    Estratégia de Redução de Gastos & Modo Econômico
-                  </CardTitle>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700">
-                    Custo Zero Recomendado
-                  </span>
-                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
-                    Plano Spark: 1 GB Grátis
-                  </span>
-                </div>
-                <CardDescription className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">
-                  Controle a retenção e elimine o acúmulo desnecessário de dados no Firebase Realtime Database.
-                </CardDescription>
-              </div>
+      {/* DESTAQUE RÁPIDO PARA A MAIOR COLUNA: conference_dashboards */}
+      {(stats.sections.conferenceDashboards?.count > 0 || stats.sections.conference_dashboards?.count > 0) && (
+        <div className="p-4 rounded-xl border border-rose-300 dark:border-rose-800 bg-rose-50/70 dark:bg-rose-950/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-xl bg-rose-600 text-white shrink-0 shadow-xs">
+              <Radio className="h-5 w-5" />
             </div>
-
-            <Button
-              type="button"
-              size="sm"
-              onClick={handleApplyEconomyNow}
-              disabled={isApplyingEconomy}
-              className="text-xs h-9 font-bold bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer shadow-xs shrink-0 flex items-center gap-2"
-            >
-              <Sparkles className={`h-4 w-4 ${isApplyingEconomy ? 'animate-spin' : ''}`} />
-              {isApplyingEconomy ? 'Aplicando Redução...' : 'Ativar Modo Econômico Agora'}
-            </Button>
-          </div>
-        </CardHeader>
-
-        <CardContent className="p-4 sm:p-5 pt-4 space-y-4">
-          {/* Seletor de Modo Econômico */}
-          <div className="space-y-2">
-            <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300 flex items-center gap-1.5">
-              <Sliders className="h-3.5 w-3.5 text-emerald-600" />
-              <span>Selecione a Política de Armazenamento:</span>
-            </label>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              {/* Opção 1: Extremo */}
-              <div
-                onClick={() => handleUpdateEconomyMode('extreme')}
-                className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
-                  economySettings.economyMode === 'extreme'
-                    ? 'border-emerald-500 bg-emerald-100/40 dark:bg-emerald-950/40 ring-1 ring-emerald-500'
-                    : 'border-zinc-200 dark:border-zinc-800 bg-white/70 dark:bg-zinc-900/60 hover:border-emerald-300'
-                }`}
-              >
-                <div className="flex items-center justify-between mb-1.5">
-                  <div className="flex items-center gap-2">
-                    <Zap className="h-4 w-4 text-emerald-600 shrink-0" />
-                    <span className="text-xs font-bold text-zinc-900 dark:text-zinc-100">
-                      Modo Extremo (Recomendado)
-                    </span>
-                  </div>
-                  {economySettings.economyMode === 'extreme' && (
-                    <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
-                  )}
-                </div>
-                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                  <strong>Custo Zero & Máxima Velocidade:</strong> Mantém apenas 1 espelho ao vivo no Firebase. Histórico de conferências fica no computador local. Limita arquivos e atividades a 30 itens com expurgo automático. Reduz em até 98% o consumo de banco e banda.
-                </p>
-              </div>
-
-              {/* Opção 2: Padrão */}
-              <div
-                onClick={() => handleUpdateEconomyMode('standard')}
-                className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
-                  economySettings.economyMode === 'standard'
-                    ? 'border-emerald-500 bg-emerald-100/40 dark:bg-emerald-950/40 ring-1 ring-emerald-500'
-                    : 'border-zinc-200 dark:border-zinc-800 bg-white/70 dark:bg-zinc-900/60 hover:border-emerald-300'
-                }`}
-              >
-                <div className="flex items-center justify-between mb-1.5">
-                  <div className="flex items-center gap-2">
-                    <ShieldCheck className="h-4 w-4 text-blue-600 shrink-0" />
-                    <span className="text-xs font-bold text-zinc-900 dark:text-zinc-100">
-                      Modo Otimizado Balanceado
-                    </span>
-                  </div>
-                  {economySettings.economyMode === 'standard' && (
-                    <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
-                  )}
-                </div>
-                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                  Mantém até 3 espelhos históricos em versão compacta (sem replicar listas brutas de notas). Histórico de arquivos e atividades limitado a 100 itens.
-                </p>
-              </div>
-
-              {/* Opção 3: Personalizado */}
-              <div
-                onClick={() => handleUpdateEconomyMode('custom')}
-                className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
-                  economySettings.economyMode === 'custom'
-                    ? 'border-emerald-500 bg-emerald-100/40 dark:bg-emerald-950/40 ring-1 ring-emerald-500'
-                    : 'border-zinc-200 dark:border-zinc-800 bg-white/70 dark:bg-zinc-900/60 hover:border-emerald-300'
-                }`}
-              >
-                <div className="flex items-center justify-between mb-1.5">
-                  <div className="flex items-center gap-2">
-                    <Sliders className="h-4 w-4 text-purple-600 shrink-0" />
-                    <span className="text-xs font-bold text-zinc-900 dark:text-zinc-100">
-                      Modo Personalizado
-                    </span>
-                  </div>
-                  {economySettings.economyMode === 'custom' && (
-                    <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
-                  )}
-                </div>
-                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                  Permite definir limites customizados de retenção por nó do Firebase de acordo com a política da sua empresa.
-                </p>
-              </div>
+            <div>
+              <h4 className="text-xs font-bold text-rose-950 dark:text-rose-100 flex items-center gap-2">
+                <span>Coluna Principal:</span>
+                <code className="text-xs font-mono font-bold text-rose-700 dark:text-rose-300 bg-rose-100 dark:bg-rose-900/60 px-1.5 py-0.5 rounded">
+                  vlic_telemetry/conference_dashboards
+                </code>
+                <span className="text-[11px] font-bold text-rose-800 dark:text-rose-200">
+                  ({(stats.sections.conferenceDashboards?.count || stats.sections.conference_dashboards?.count || 0).toLocaleString('pt-BR')} registros • {formatBytes(stats.sections.conferenceDashboards?.bytes || stats.sections.conference_dashboards?.bytes || 0)})
+                </span>
+              </h4>
+              <p className="text-[11px] text-zinc-600 dark:text-zinc-400 mt-0.5">
+                Esta coluna contém os espelhos e históricos de sessões mostrados no seu Firebase. Clique ao lado para esvaziar todos os registros desta coluna diretamente no banco.
+              </p>
             </div>
           </div>
 
-          {/* Seção Explicativa Colapsável */}
-          <div className="pt-2 border-t border-emerald-100 dark:border-emerald-900/40">
-            <button
-              type="button"
-              onClick={() => setShowEconomyDetails(!showEconomyDetails)}
-              className="w-full flex items-center justify-between text-left text-xs font-bold text-zinc-700 dark:text-zinc-300 hover:text-emerald-700 dark:hover:text-emerald-400 py-1 cursor-pointer transition-colors"
-            >
-              <div className="flex items-center gap-2">
-                <Info className="h-4 w-4 text-emerald-600" />
-                <span>O que podemos fazer para reduzir os gastos de banco de dados? (Clique para ver as 5 medidas)</span>
-              </div>
-              {showEconomyDetails ? (
-                <ChevronUp className="h-4 w-4 text-zinc-400" />
-              ) : (
-                <ChevronDown className="h-4 w-4 text-zinc-400" />
-              )}
-            </button>
-
-            {showEconomyDetails && (
-              <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px] text-zinc-600 dark:text-zinc-400 bg-emerald-50/40 dark:bg-emerald-950/20 p-3.5 rounded-xl border border-emerald-200/60 dark:border-emerald-800/40">
-                <div className="space-y-1.5">
-                  <h5 className="font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
-                    <span className="w-4 h-4 rounded-full bg-emerald-600 text-white inline-flex items-center justify-center text-[10px]">1</span>
-                    Como o Firebase cobra
-                  </h5>
-                  <p className="leading-relaxed">
-                    O Firebase cobra por <strong>espaço armazenado</strong> (acima de 1 GB no plano gratuito) e por <strong>download de dados/banda</strong> (acima de 10 GB/mês). Cada vez que uma tela é aberta, ela baixa os dados dos nós subscritos.
-                  </p>
-                </div>
-
-                <div className="space-y-1.5">
-                  <h5 className="font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
-                    <span className="w-4 h-4 rounded-full bg-emerald-600 text-white inline-flex items-center justify-center text-[10px]">2</span>
-                    O maior vilão: conference_dashboards
-                  </h5>
-                  <p className="leading-relaxed">
-                    Cada conferência salva na íntegra relatórios com centenas de notas fiscais. O <strong>Modo Extremo</strong> desativa o acúmulo infinito de cópias na nuvem, mantendo apenas 1 espelho ativo e salvando históricos localmente.
-                  </p>
-                </div>
-
-                <div className="space-y-1.5">
-                  <h5 className="font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
-                    <span className="w-4 h-4 rounded-full bg-emerald-600 text-white inline-flex items-center justify-center text-[10px]">3</span>
-                    Expurgo Automático (Rotatividade)
-                  </h5>
-                  <p className="leading-relaxed">
-                    Arquivos de entrada (<code>input_files</code>) e atividades (<code>activities</code>) agora têm expurgo automático em segundo plano, mantendo apenas os últimos registros e deletando dados antigos sem intervenção manual.
-                  </p>
-                </div>
-
-                <div className="space-y-1.5">
-                  <h5 className="font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
-                    <span className="w-4 h-4 rounded-full bg-emerald-600 text-white inline-flex items-center justify-center text-[10px]">4</span>
-                    Economia de Banda (Queries Limitadas)
-                  </h5>
-                  <p className="leading-relaxed">
-                    Todas as escutas do Firebase agora usam <code>limitToLast(60)</code>. O navegador nunca baixa a árvore inteira de uma só vez, economizando gigabytes de cota de transferência e acelerando o carregamento.
-                  </p>
-                </div>
-              </div>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* DESTAQUE RÁPIDO PARA A COLUNA: conference_dashboards (SEMPRE VISÍVEL) */}
-      <div className="p-4 rounded-xl border border-rose-300 dark:border-rose-800 bg-rose-50/70 dark:bg-rose-950/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
-        <div className="flex items-center gap-3">
-          <div className="p-2.5 rounded-xl bg-rose-600 text-white shrink-0 shadow-xs">
-            <Radio className="h-5 w-5" />
-          </div>
-          <div>
-            <h4 className="text-xs font-bold text-rose-950 dark:text-rose-100 flex items-center gap-2">
-              <span>Coluna de Espelhos:</span>
-              <code className="text-xs font-mono font-bold text-rose-700 dark:text-rose-300 bg-rose-100 dark:bg-rose-900/60 px-1.5 py-0.5 rounded">
-                vlic_telemetry/conference_dashboards
-              </code>
-              <span className="text-[11px] font-bold text-rose-800 dark:text-rose-200">
-                ({(stats.sections.conferenceDashboards?.count || stats.sections.conference_dashboards?.count || 0).toLocaleString('pt-BR')} registros • {formatBytes(stats.sections.conferenceDashboards?.bytes || stats.sections.conference_dashboards?.bytes || 0)})
-              </span>
-            </h4>
-            <p className="text-[11px] text-zinc-600 dark:text-zinc-400 mt-0.5">
-              Esta coluna contém todos os espelhos e snapshots gerados no seu Firebase Realtime Database. Clique ao lado para apagar permanentemente e zerar esta pasta no banco.
-            </p>
-          </div>
+          <Button
+            type="button"
+            size="sm"
+            onClick={() =>
+              setNodeToPurge({
+                path: 'vlic_telemetry/conference_dashboards',
+                label: 'conference_dashboards',
+                count: stats.sections.conferenceDashboards?.count || stats.sections.conference_dashboards?.count || 0,
+                bytes: stats.sections.conferenceDashboards?.bytes || stats.sections.conference_dashboards?.bytes || 0,
+              })
+            }
+            className="text-xs h-8.5 font-bold bg-rose-600 hover:bg-rose-700 text-white cursor-pointer shadow-xs shrink-0 flex items-center gap-1.5"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Esvaziar conference_dashboards Agora
+          </Button>
         </div>
-
-        <Button
-          type="button"
-          size="sm"
-          onClick={() =>
-            setNodeToPurge({
-              path: 'vlic_telemetry/conference_dashboards',
-              label: 'conference_dashboards',
-              count: stats.sections.conferenceDashboards?.count || stats.sections.conference_dashboards?.count || 0,
-              bytes: stats.sections.conferenceDashboards?.bytes || stats.sections.conference_dashboards?.bytes || 0,
-            })
-          }
-          className="text-xs h-8.5 font-bold bg-rose-600 hover:bg-rose-700 text-white cursor-pointer shadow-xs shrink-0 flex items-center gap-1.5"
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-          Excluir Todos os Espelhos Agora
-        </Button>
-      </div>
+      )}
 
       {/* BARRA DE AÇÕES EM LOTE DE COLUNAS */}
       <div className="p-3.5 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-900/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
@@ -919,25 +601,14 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
 
       {/* SEÇÕES DETALHADAS DAS COLUNAS DO BANCO (vlic_telemetry) */}
       <div className="space-y-3">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-1">
+        <div className="flex items-center justify-between px-1">
           <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase flex items-center gap-1.5">
             <Layers className="h-4 w-4 text-zinc-500" />
             <span>Colunas do Banco de Dados (vlic_telemetry)</span>
           </h3>
-          <div className="flex items-center gap-2 flex-wrap">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => setHideEmptyColumns(!hideEmptyColumns)}
-              className="text-[11px] h-7 px-2.5 font-semibold text-zinc-700 dark:text-zinc-300 cursor-pointer"
-            >
-              {hideEmptyColumns ? 'Exibir Todas as Chaves' : 'Ocultar Chaves Vazias/Apagadas'}
-            </Button>
-            <span className="text-[11px] text-zinc-400 hidden lg:inline">
-              Cada coluna pode ser esvaziada individualmente ou em lote
-            </span>
-          </div>
+          <span className="text-[11px] text-zinc-400">
+            Cada coluna pode ser esvaziada individualmente ou em lote
+          </span>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -948,9 +619,6 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
             const bytes = metric?.bytes || 0
             const isSelected = selectedColumns.includes(col.path)
             const isCurrentActionLoading = actionLoadingKey === col.path
-            const isEmpty = count === 0 && bytes === 0
-
-            if (hideEmptyColumns && isEmpty) return null
 
             return (
               <div
@@ -1000,20 +668,15 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
                     <span className="font-mono text-xs font-bold text-zinc-900 dark:text-zinc-100 block">
                       {formatBytes(bytes)}
                     </span>
-                    <span className="text-[10px] text-zinc-400 block">
+                    <span className="text-[10px] text-zinc-400">
                       {count} {count === 1 ? 'registro' : 'registros'}
                     </span>
-                    {isEmpty && (
-                      <span className="mt-1 inline-flex items-center gap-1 text-[9px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-200 dark:border-emerald-800">
-                        <CheckCircle2 className="h-2.5 w-2.5" /> Chave Vazia / Apagada
-                      </span>
-                    )}
                   </div>
                 </div>
 
                 <div className="flex items-center justify-end gap-1.5 pt-2 border-t border-zinc-100 dark:border-zinc-800">
                   {/* Botões específicos para espelhos */}
-                  {col.key === 'conference_dashboards' && count > 0 && (
+                  {col.key === 'conference_dashboards' && (
                     <Button
                       type="button"
                       size="sm"
@@ -1033,7 +696,7 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
                   )}
 
                   {/* Botões específicos para arquivos */}
-                  {col.key === 'input_files' && count > 0 && (
+                  {col.key === 'input_files' && (
                     <Button
                       type="button"
                       size="sm"
@@ -1052,7 +715,7 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
                     </Button>
                   )}
 
-                  {/* Botão Direto de Limpar Esta Coluna / Excluir Chave do Banco */}
+                  {/* Botão Direto de Limpar Esta Coluna */}
                   <Button
                     type="button"
                     size="sm"
@@ -1067,14 +730,13 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
                     }
                     disabled={isCurrentActionLoading}
                     className="text-[11px] h-7 px-2.5 font-bold cursor-pointer text-rose-600 dark:text-rose-400 border-rose-200 dark:border-rose-900 hover:bg-rose-50 dark:hover:bg-rose-950/40"
-                    title={isEmpty ? "Remove permanentemente este título e chave do Firebase" : "Limpa todos os dados armazenados nesta coluna"}
                   >
                     {isCurrentActionLoading ? (
                       <RefreshCw className="h-3 w-3 mr-1 animate-spin" />
                     ) : (
                       <Trash2 className="h-3 w-3 mr-1" />
                     )}
-                    {isEmpty ? 'Excluir Chave do Banco' : 'Limpar Coluna'}
+                    Limpar Coluna
                   </Button>
                 </div>
               </div>
@@ -1212,32 +874,6 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
         </div>
       </div>
 
-      {/* ZONA DE PERIGO: WIPE TOTAL PRESERVANDO APENAS USERS E USER_DEPARTMENTS */}
-      <Card className="border border-purple-200 dark:border-purple-900/60 bg-purple-50/20 dark:bg-purple-950/15 shadow-xs">
-        <CardContent className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2 text-purple-900 dark:text-purple-300 font-bold text-xs">
-              <Trash2 className="h-4 w-4 text-purple-600" />
-              <span>Apagar Todo o Banco de Dados (Mantendo Exclusivamente users e user_departments)</span>
-            </div>
-            <p className="text-[11px] text-zinc-600 dark:text-zinc-400 max-w-xl">
-              Exclui completamente todos os espelhos, conferências, atividades, métricas, presenças, arquivos inputados e dados externos no Firebase. 
-              <strong> Os nós de Usuários (<code>users</code>) e Departamentos (<code>user_departments</code>) permanecem 100% preservados e intactos.</strong>
-            </p>
-          </div>
-
-          <Button
-            type="button"
-            size="sm"
-            onClick={() => setIsWipeKeepUsersModalOpen(true)}
-            className="text-xs h-8 px-3 font-bold bg-purple-700 hover:bg-purple-800 text-white cursor-pointer shrink-0 shadow-xs"
-          >
-            <Trash2 className="h-3.5 w-3.5 mr-1 text-white" />
-            Wipe (Manter Usuários)
-          </Button>
-        </CardContent>
-      </Card>
-
       {/* ZONA DE PERIGO: LIMPEZA COMPLETA DE TELEMETRIA */}
       <Card className="border border-rose-200 dark:border-rose-900/60 bg-rose-50/15 dark:bg-rose-950/10 shadow-xs">
         <CardContent className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -1261,269 +897,6 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
             <Trash2 className="h-3.5 w-3.5 mr-1 text-rose-600" />
             Reset Completo da Raiz
           </Button>
-        </CardContent>
-      </Card>
-
-      {/* GUIA DE REGRAS DO FIREBASE REALTIME DATABASE */}
-      <Card className="border border-blue-200 dark:border-blue-900/60 bg-blue-50/15 dark:bg-blue-950/10 shadow-xs">
-        <CardContent className="p-4 space-y-3">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-blue-900 dark:text-blue-300 font-bold text-xs">
-              <ShieldCheck className="h-4 w-4 text-blue-600" />
-              <span>Regras de Permissão do Firebase Realtime Database (Correção de permission_denied)</span>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <div className="flex items-center rounded-lg bg-zinc-200/80 dark:bg-zinc-800 p-0.5 text-[11px] font-semibold">
-                <button
-                  type="button"
-                  onClick={() => setRulesTab('rbac')}
-                  className={`px-2 py-1 rounded-md transition-all cursor-pointer ${
-                    rulesTab === 'rbac'
-                      ? 'bg-white dark:bg-zinc-900 text-blue-700 dark:text-blue-300 shadow-2xs font-bold'
-                      : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900'
-                  }`}
-                >
-                  Supervisor & Colaborador (RBAC)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRulesTab('open')}
-                  className={`px-2 py-1 rounded-md transition-all cursor-pointer ${
-                    rulesTab === 'open'
-                      ? 'bg-white dark:bg-zinc-900 text-blue-700 dark:text-blue-300 shadow-2xs font-bold'
-                      : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900'
-                  }`}
-                >
-                  Regras Abertas (Simplificadas)
-                </button>
-              </div>
-
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  const rbacRulesText = `{
-  "rules": {
-    "usuarios": {
-      ".read": "auth != null",
-      "$uid": {
-        ".write": "auth != null && (auth.uid == $uid || root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' || root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' || root.child('usuarios').child(auth.uid).child('role').val() == 'supervisor' || auth.token.email == 'thiago_gja27@hotmail.com' || auth.token.email == 'thiago.gja27@hotmail.com' || auth.token.email == 'admin@tegporto.com.br')"
-      }
-    },
-    "vlic_telemetry": {
-      ".read": "auth != null",
-      ".write": "auth != null && (root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' || root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' || root.child('usuarios').child(auth.uid).child('role').val() == 'supervisor' || root.child('usuarios').child(auth.uid).child('departamento').val() == 'supervisor' || auth.token.email == 'thiago_gja27@hotmail.com' || auth.token.email == 'thiago.gja27@hotmail.com' || auth.token.email == 'thiago.viaembratelgja@gmail.com' || auth.token.email == 'admin@tegporto.com.br')",
-      "users": {
-        ".read": "auth != null",
-        "$uid": {
-          ".write": "auth != null && (auth.uid == $uid || root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' || root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' || auth.token.email == 'thiago_gja27@hotmail.com' || auth.token.email == 'thiago.gja27@hotmail.com' || auth.token.email == 'admin@tegporto.com.br')"
-        }
-      },
-      "user_departments": {
-        ".read": "auth != null",
-        ".write": "auth != null && (root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' || root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' || auth.token.email == 'thiago_gja27@hotmail.com' || auth.token.email == 'thiago.gja27@hotmail.com' || auth.token.email == 'admin@tegporto.com.br')"
-      },
-      "$subnode": {
-        ".read": "auth != null",
-        ".write": "auth != null && (root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' || root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' || root.child('usuarios').child(auth.uid).child('role').val() == 'supervisor' || root.child('usuarios').child(auth.uid).child('departamento').val() == 'supervisor' || auth.token.email == 'thiago_gja27@hotmail.com' || auth.token.email == 'thiago.gja27@hotmail.com' || auth.token.email == 'admin@tegporto.com.br' || !data.exists())",
-        "$item": {
-          ".read": "auth != null",
-          ".write": "auth != null && (root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' || root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' || root.child('usuarios').child(auth.uid).child('role').val() == 'supervisor' || root.child('usuarios').child(auth.uid).child('departamento').val() == 'supervisor' || auth.token.email == 'thiago_gja27@hotmail.com' || auth.token.email == 'thiago.gja27@hotmail.com' || auth.token.email == 'admin@tegporto.com.br' || !data.exists())"
-        }
-      }
-    },
-    "dados": {
-      ".read": "auth != null",
-      ".write": "auth != null && (root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' || root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' || root.child('usuarios').child(auth.uid).child('role').val() == 'supervisor' || auth.token.email == 'thiago_gja27@hotmail.com' || auth.token.email == 'admin@tegporto.com.br')",
-      "$id": {
-        ".read": "auth != null",
-        ".write": "auth != null && (root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' || root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' || root.child('usuarios').child(auth.uid).child('role').val() == 'supervisor' || auth.token.email == 'thiago_gja27@hotmail.com' || auth.token.email == 'admin@tegporto.com.br' || !data.exists())"
-      }
-    },
-    "cadastros_logisticos": {
-      ".read": "auth != null",
-      ".write": "auth != null"
-    },
-    "rumo_files": {
-      ".read": "auth != null",
-      ".write": "auth != null"
-    }
-  }
-}`
-
-                  const openRulesText = `{
-  "rules": {
-    "vlic_telemetry": {
-      ".read": true,
-      ".write": true
-    },
-    "dados": {
-      ".read": true,
-      ".write": true
-    },
-    "usuarios": {
-      ".read": true,
-      ".write": true
-    },
-    "cadastros_logisticos": {
-      ".read": true,
-      ".write": true
-    },
-    "rumo_files": {
-      ".read": true,
-      ".write": true
-    }
-  }
-}`
-
-                  const targetText = rulesTab === 'rbac' ? rbacRulesText : openRulesText
-                  navigator.clipboard.writeText(targetText)
-                  setCopiedRules(true)
-                  setTimeout(() => setCopiedRules(false), 3000)
-                  onNotify?.('Regras copiadas! Cole no Firebase Console > Realtime Database > Regras (Rules).', 'success')
-                }}
-                className="text-xs h-7 px-2.5 font-bold border-blue-300 dark:border-blue-800 text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-950 cursor-pointer shrink-0"
-              >
-                {copiedRules ? <Check className="h-3 w-3 mr-1 text-emerald-600" /> : <Copy className="h-3 w-3 mr-1" />}
-                {copiedRules ? 'Regras Copiadas!' : 'Copiar Regras do Firebase'}
-              </Button>
-            </div>
-          </div>
-
-          <div className="text-[11px] text-zinc-600 dark:text-zinc-400 space-y-1.5 leading-relaxed">
-            <p>
-              <strong>Por que o Supervisor era bloqueado na exclusão e restavam as chaves/títulos?</strong>
-            </p>
-            <ul className="list-disc pl-5 space-y-1 text-[11px]">
-              <li>
-                <strong>Caminho <code className="text-rose-600 font-mono">vlic_telemetry</code> ausente nas regras:</strong> O Firebase Realtime Database bloqueia por padrão qualquer nó não declarado. Como a sua regra anterior continha apenas o nó <code className="font-mono text-zinc-800 dark:text-zinc-200">"dados"</code>, todas as operações sob <code className="font-mono text-zinc-800 dark:text-zinc-200">vlic_telemetry</code> (espelhos, atividades, presenças, arquivos inputados) geravam <code className="text-rose-600 font-mono">permission_denied</code>.
-              </li>
-              <li>
-                <strong>Regra <code className="font-mono text-zinc-800 dark:text-zinc-200">.write</code> apenas no filho <code className="font-mono text-zinc-800 dark:text-zinc-200">$id</code>:</strong> No Firebase, permissão em nós filhos não autoriza apagar ou sobrescrever a pasta pai. Para que o supervisor consiga apagar uma chave inteira (como <code className="font-mono text-zinc-800 dark:text-zinc-200">conference_dashboards</code> ou o nó raiz), a permissão de <code className="font-mono text-zinc-800 dark:text-zinc-200">.write</code> precisa estar declarada também no nível do nó pai.
-              </li>
-              <li>
-                <strong>Com as regras abaixo:</strong> O <strong>supervisor tem permissão total irrestrita</strong> de leitura, modificação e <strong>exclusão completa de nós e chaves</strong>, enquanto o <strong>colaborador só pode inserir novos dados</strong> (<code className="font-mono text-emerald-600">!data.exists()</code>), ficando impedido de excluir ou sobrescrever.
-              </li>
-            </ul>
-          </div>
-
-          <pre className="p-3 rounded-lg bg-zinc-950 text-emerald-400 font-mono text-[11px] overflow-x-auto leading-relaxed border border-zinc-800 max-h-72">
-{rulesTab === 'rbac'
-  ? `{
-  "rules": {
-    "usuarios": {
-      ".read": "auth != null",
-      "$uid": {
-        ".write": "auth != null && (auth.uid == $uid || root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' || root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' || root.child('usuarios').child(auth.uid).child('role').val() == 'supervisor' || auth.token.email == 'thiago_gja27@hotmail.com' || auth.token.email == 'thiago.gja27@hotmail.com' || auth.token.email == 'admin@tegporto.com.br')"
-      }
-    },
-    "vlic_telemetry": {
-      ".read": "auth != null",
-      ".write": "auth != null && (
-        root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' ||
-        root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' ||
-        root.child('usuarios').child(auth.uid).child('role').val() == 'supervisor' ||
-        root.child('usuarios').child(auth.uid).child('departamento').val() == 'supervisor' ||
-        auth.token.email == 'thiago_gja27@hotmail.com' ||
-        auth.token.email == 'thiago.gja27@hotmail.com' ||
-        auth.token.email == 'thiago.viaembratelgja@gmail.com' ||
-        auth.token.email == 'admin@tegporto.com.br'
-      )",
-      "users": {
-        ".read": "auth != null",
-        "$uid": {
-          ".write": "auth != null && (auth.uid == $uid || root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' || root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' || auth.token.email == 'thiago_gja27@hotmail.com' || auth.token.email == 'thiago.gja27@hotmail.com' || auth.token.email == 'admin@tegporto.com.br')"
-        }
-      },
-      "user_departments": {
-        ".read": "auth != null",
-        ".write": "auth != null && (root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' || root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' || auth.token.email == 'thiago_gja27@hotmail.com' || auth.token.email == 'thiago.gja27@hotmail.com' || auth.token.email == 'admin@tegporto.com.br')"
-      },
-      "$subnode": {
-        ".read": "auth != null",
-        ".write": "auth != null && (
-          root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' ||
-          root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' ||
-          root.child('usuarios').child(auth.uid).child('role').val() == 'supervisor' ||
-          root.child('usuarios').child(auth.uid).child('departamento').val() == 'supervisor' ||
-          auth.token.email == 'thiago_gja27@hotmail.com' ||
-          auth.token.email == 'thiago.gja27@hotmail.com' ||
-          auth.token.email == 'admin@tegporto.com.br' ||
-          !data.exists()
-        )",
-        "$item": {
-          ".read": "auth != null",
-          ".write": "auth != null && (
-            root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' ||
-            root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' ||
-            root.child('usuarios').child(auth.uid).child('role').val() == 'supervisor' ||
-            root.child('usuarios').child(auth.uid).child('departamento').val() == 'supervisor' ||
-            auth.token.email == 'thiago_gja27@hotmail.com' ||
-            auth.token.email == 'thiago.gja27@hotmail.com' ||
-            auth.token.email == 'admin@tegporto.com.br' ||
-            !data.exists()
-          )"
-        }
-      }
-    },
-    "dados": {
-      ".read": "auth != null",
-      ".write": "auth != null && (
-        root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' ||
-        root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' ||
-        root.child('usuarios').child(auth.uid).child('role').val() == 'supervisor' ||
-        auth.token.email == 'thiago_gja27@hotmail.com' ||
-        auth.token.email == 'admin@tegporto.com.br'
-      )",
-      "$id": {
-        ".read": "auth != null",
-        ".write": "auth != null && (
-          root.child('vlic_telemetry').child('users').child(auth.uid).child('departamento').val() == 'supervisor' ||
-          root.child('vlic_telemetry').child('users').child(auth.uid).child('role').val() == 'supervisor' ||
-          root.child('usuarios').child(auth.uid).child('role').val() == 'supervisor' ||
-          auth.token.email == 'thiago_gja27@hotmail.com' ||
-          auth.token.email == 'admin@tegporto.com.br' ||
-          !data.exists()
-        )"
-      }
-    },
-    "cadastros_logisticos": {
-      ".read": "auth != null",
-      ".write": "auth != null"
-    },
-    "rumo_files": {
-      ".read": "auth != null",
-      ".write": "auth != null"
-    }
-  }
-}`
-  : `{
-  "rules": {
-    "vlic_telemetry": {
-      ".read": true,
-      ".write": true
-    },
-    "dados": {
-      ".read": true,
-      ".write": true
-    },
-    "usuarios": {
-      ".read": true,
-      ".write": true
-    },
-    "cadastros_logisticos": {
-      ".read": true,
-      ".write": true
-    },
-    "rumo_files": {
-      ".read": true,
-      ".write": true
-    }
-  }
-}`}
-          </pre>
         </CardContent>
       </Card>
 
@@ -1687,137 +1060,6 @@ export function DatabaseStorageManager({ onNotify }: DatabaseStorageManagerProps
               className="text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white cursor-pointer"
             >
               Confirmar e Limpar Banco
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* MODAL 4: CONFIRMAÇÃO DE APAGAR TÍTULOS E CHAVES RESIDUAIS DO BANCO */}
-      <Dialog open={isPurgeResidualKeysModalOpen} onOpenChange={setIsPurgeResidualKeysModalOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-amber-600">
-              <Trash2 className="h-5 w-5" />
-              Apagar Títulos e Chaves Residuais do Banco
-            </DialogTitle>
-            <DialogDescription className="text-xs">
-              Remoção profunda de todos os títulos, chaves e nós que continuam no Firebase Realtime Database após a exclusão anterior de dados.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-3 py-2 text-xs text-zinc-700 dark:text-zinc-300">
-            <p>
-              Esta ação executará uma limpeza completa no <strong>Firebase Realtime Database</strong>:
-            </p>
-            <ul className="list-disc pl-5 space-y-1 text-zinc-600 dark:text-zinc-400">
-              <li>Exclui os títulos e chaves de espelhos (<code>conference_dashboards</code> e <code>latest_conference_dashboard</code>)</li>
-              <li>Exclui a pasta de arquivos inputados (<code>input_files</code>)</li>
-              <li>Exclui métricas, atividades, presenças e telas residuais (<code>metrics</code>, <code>activities</code>, <code>presence</code>, <code>screens</code>, <code>suggestions</code>)</li>
-              <li>Remove o nó raiz <code>vlic_telemetry</code> via REST e SDK, garantindo que nenhuma chave vazia permaneça</li>
-            </ul>
-            <p className="font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 p-2 rounded-lg border border-emerald-200 dark:border-emerald-800">
-              ✓ Seus cadastros de destinatários e transbordos continuarão 100% preservados.
-            </p>
-          </div>
-
-          <DialogFooter className="gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setIsPurgeResidualKeysModalOpen(false)}
-              className="text-xs cursor-pointer"
-            >
-              Cancelar
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              onClick={handlePurgeResidualKeys}
-              disabled={isOptimizing}
-              className="text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white cursor-pointer"
-            >
-              {isOptimizing ? <RefreshCw className="h-3 w-3 mr-1 animate-spin" /> : <Trash2 className="h-3 w-3 mr-1" />}
-              Sim, Apagar Todos os Títulos e Chaves Agora
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* MODAL 5: CONFIRMAÇÃO DE WIPE TOTAL (PRESERVANDO EXCLUSIVAMENTE USERS E USER_DEPARTMENTS) */}
-      <Dialog open={isWipeKeepUsersModalOpen} onOpenChange={setIsWipeKeepUsersModalOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-purple-700 dark:text-purple-400">
-              <Trash2 className="h-5 w-5" />
-              Apagar Todo o Banco (Preservando Apenas Usuários)
-            </DialogTitle>
-            <DialogDescription className="text-xs">
-              Limpeza profunda de todo o banco de dados Firebase Realtime, mantendo intactos exclusivamente os usuários e departamentos.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-3 py-2 text-xs text-zinc-700 dark:text-zinc-300">
-            <div className="p-2.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 space-y-1">
-              <p className="font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
-                <ShieldCheck className="h-4 w-4 text-emerald-600" />
-                O que SERÁ PRESERVADO:
-              </p>
-              <ul className="list-disc pl-5 text-[11px] text-emerald-700 dark:text-emerald-300 space-y-0.5">
-                <li><strong>vlic_telemetry/users</strong> (perfis e cargos de operadores/supervisores)</li>
-                <li><strong>vlic_telemetry/user_departments</strong> (departamentos por e-mail)</li>
-              </ul>
-            </div>
-
-            <div className="p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900/60 space-y-1">
-              <p className="font-bold text-rose-800 dark:text-rose-300 flex items-center gap-1.5">
-                <AlertTriangle className="h-4 w-4 text-rose-600" />
-                O que SERÁ TOTALMENTE APAGADO:
-              </p>
-              <ul className="list-disc pl-5 text-[11px] text-rose-700 dark:text-rose-400 space-y-0.5">
-                <li>Todos os espelhos de conferência (<code>conference_dashboards</code>)</li>
-                <li>Histórico de arquivos inputados (<code>input_files</code>)</li>
-                <li>Métricas, atividades da linha do tempo e telas (<code>metrics</code>, <code>activities</code>, <code>screens</code>)</li>
-                <li>Presenças e sugestões (<code>presence</code>, <code>suggestions</code>)</li>
-                <li>Tabelas adicionais (ex: <code>dados</code>, <code>rumo_files</code>, etc.)</li>
-              </ul>
-            </div>
-
-            <div className="space-y-1 pt-1">
-              <p className="text-xs font-semibold text-zinc-800 dark:text-zinc-200">
-                Para confirmar a exclusão, digite <strong className="text-purple-700 dark:text-purple-400 font-mono">LIMPAR TUDO</strong>:
-              </p>
-              <Input
-                value={wipeConfirmText}
-                onChange={(e) => setWipeConfirmText(e.target.value)}
-                placeholder="Digite LIMPAR TUDO"
-                className="text-xs uppercase font-mono font-bold"
-              />
-            </div>
-          </div>
-
-          <DialogFooter className="gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setIsWipeKeepUsersModalOpen(false)
-                setWipeConfirmText('')
-              }}
-              className="text-xs cursor-pointer"
-            >
-              Cancelar
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              disabled={wipeConfirmText.trim().toUpperCase() !== 'LIMPAR TUDO' || isOptimizing}
-              onClick={handleWipeDatabasePreservingUsers}
-              className="text-xs font-bold bg-purple-700 hover:bg-purple-800 text-white cursor-pointer"
-            >
-              {isOptimizing ? <RefreshCw className="h-3 w-3 mr-1 animate-spin" /> : <Trash2 className="h-3 w-3 mr-1" />}
-              Confirmar e Apagar Todo o Banco
             </Button>
           </DialogFooter>
         </DialogContent>

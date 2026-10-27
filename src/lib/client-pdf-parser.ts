@@ -1,5 +1,18 @@
+import * as pdfjsLib from 'pdfjs-dist'
+import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { parseMultiDanfePdf } from './pdf-text-parser'
 import { parseNFE } from './nfe-parser'
+
+// Configuração segura do worker do pdf.js no browser
+if (typeof window !== 'undefined') {
+  try {
+    if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerSrc
+    }
+  } catch (e) {
+    console.warn('Configuração de worker pdf.js:', e)
+  }
+}
 
 // Helper para converter ArrayBuffer para Base64 com segurança
 export function arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -15,22 +28,14 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
 }
 
 /**
- * Extrator com pdfjs-dist no navegador com fallback nativo resiliente
+ * Extrator com pdfjs-dist no navegador
  */
 export async function extractPdfTextWithPdfJs(arrayBuffer: ArrayBuffer): Promise<{ text: string; pages: { num: number; text: string }[] }> {
   try {
-    const pdfjsLib = await import('pdfjs-dist')
     if (typeof window !== 'undefined' && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
-      try {
-        pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-          'pdfjs-dist/build/pdf.worker.min.mjs',
-          import.meta.url
-        ).toString()
-      } catch {
-        // Fallback seguro em caso de restrição de ambiente
-      }
+      pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerSrc
     }
-    const data = new Uint8Array(arrayBuffer.slice(0))
+    const data = new Uint8Array(arrayBuffer)
     const loadingTask = pdfjsLib.getDocument({
       data,
       useSystemFonts: true,

@@ -6,7 +6,6 @@ import { Button } from '@/components/ui/button'
 import { parseNFE, verifyChaveCNPJ, type NFEData, extractDataEmissao, extractNumeroNF, formatCNPJ } from '@/lib/nfe-parser'
 import { parsePdfClientSide } from '@/lib/client-pdf-parser'
 import { normalizeNfeRecipient, prioritizeSavedRecipient } from '@/lib/pdf-recipient-resolution'
-import { isCarrierCnpj } from '@/lib/destinatario-utils'
 import { deduplicateNfesByAccessKey } from '@/lib/nfe-deduplication'
 import { generatePDF } from '@/lib/pdf-generator'
 import { Dashboard } from '@/components/dashboard'
@@ -390,9 +389,7 @@ export function PDFToXMLConverter({ onAnalyzeXML, onOpenDocumentation }: PDFToXM
         const d = res.parsedData
         const key = d?.chave || res.nfeData?.chaveAcesso || ''
         const emitCNPJ = d?.emitCNPJ || res.nfeData?.emitente?.cnpj || ''
-        let destCNPJ = d?.destCNPJ || res.nfeData?.destinatario?.cpfCnpj || ''
-        if (isCarrierCnpj(destCNPJ)) destCNPJ = ''
-        if (!destCNPJ && emitCNPJ) destCNPJ = emitCNPJ
+        const destCNPJ = d?.destCNPJ || res.nfeData?.destinatario?.cpfCnpj || ''
         if (!key) return false
         const v = verifyChaveCNPJ(key, emitCNPJ, destCNPJ)
         return v.confrontoChaveXDest === 'DIVERGENTES'
@@ -3628,9 +3625,7 @@ export function PDFToXMLConverter({ onAnalyzeXML, onOpenDocumentation }: PDFToXM
                   const d = res.parsedData
                   const key = getNormalizedKey(res) || d?.chave || res.nfeData?.chaveAcesso || ''
                   const emitCnpj = d?.emitCNPJ || res.nfeData?.emitente?.cnpj || ''
-                  let destCnpj = d?.destCNPJ || res.nfeData?.destinatario?.cpfCnpj || ''
-                  if (isCarrierCnpj(destCnpj)) destCnpj = ''
-                  if (!destCnpj && emitCnpj) destCnpj = emitCnpj
+                  const destCnpj = d?.destCNPJ || res.nfeData?.destinatario?.cpfCnpj || ''
                   if (!key) return false
                   const v = verifyChaveCNPJ(key, emitCnpj, destCnpj)
                   return v.confrontoChaveXDest === 'DIVERGENTES'

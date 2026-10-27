@@ -91,29 +91,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setIsDemo(false)
           setLoading(false)
         } else {
-          // Carrega operador existente ou inicializa operador padrão da balança
-          const demoOp = getDemoOperator()
-          if (demoOp) {
-            setUser(demoOp)
-            setIsDemo(true)
-          } else {
-            const defaultOp = loginDemoOperator('Portaria Balança TEG', 'portaria_balanca@tegporto.com.br')
-            setUser(defaultOp)
-            setIsDemo(true)
-          }
+          setUser(null)
+          setIsDemo(false)
           setLoading(false)
         }
       })
     } else {
-      const demoOp = getDemoOperator()
-      if (demoOp) {
-        setUser(demoOp)
-        setIsDemo(true)
-      } else {
-        const defaultOp = loginDemoOperator('Portaria Balança TEG', 'portaria_balanca@tegporto.com.br')
-        setUser(defaultOp)
-        setIsDemo(true)
-      }
+      setUser(null)
+      setIsDemo(false)
       setLoading(false)
     }
 
@@ -172,20 +157,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setIsDemo(false)
       setIsAuthModalOpen(false)
     } catch (err: any) {
-      // Se for a credencial de acesso temporário da balança ou se o serviço externo estiver indisponível
-      if (
-        email.trim().toLowerCase() === 'portaria_balanca@tegporto.com.br' ||
-        pass === '@Bal120826' ||
-        !getFirebaseAuth() ||
-        err?.message?.includes('API key') ||
-        err?.message?.includes('não pôde ser inicializado')
-      ) {
-        const demoUser = loginDemoOperator('Portaria Balança TEG', email.trim() || 'portaria_balanca@tegporto.com.br')
-        setUser(demoUser)
-        setIsDemo(true)
-        setIsAuthModalOpen(false)
-        return
-      }
       throw new Error(formatFirebaseAuthError(err))
     }
   }

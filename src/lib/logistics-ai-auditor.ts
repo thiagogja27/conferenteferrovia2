@@ -1,5 +1,4 @@
 import { sanitizeDestinatarioNome } from './destinatario-utils'
-import { getExplicitGuarujaTerminalCode } from './terminal-utils'
 
 export interface LogisticsAuditInputItem {
   id: string
@@ -86,104 +85,12 @@ export function auditarLogisticaHeuristicaLocal(item: LogisticsAuditInputItem): 
   const fullText = `${item.infCpl || ''} ${item.rawSnippet || ''} ${item.xmlContent || ''} ${item.emitNome || ''} ${item.destNome || ''}`.toUpperCase()
   const camposAjustados: Array<'terminal' | 'transbordo' | 'destinatario' | 'retirada' | 'produto'> = []
   
-  let terminalCorrigido = item.terminal
+  // Terminal é 100% mecânico e não deve ser alterado pela auditoria heurística ou IA
+  const terminalCorrigido = item.terminal
   let transbordoCorrigido = item.transbordo
   let destinatarioCorrigido = item.destNome
   let retiradaCorrigida = item.retirada
   let produtoCorrigido = item.produto
-  const explicitTerminalCode = getExplicitGuarujaTerminalCode(fullText)
-  if (explicitTerminalCode) {
-    terminalCorrigido = explicitTerminalCode === 'TEAG'
-      ? 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
-      : 'TEG - TERMINAL EXPORTADOR DO GUARUJA'
-    if (terminalCorrigido !== item.terminal) camposAjustados.push('terminal')
-  }
-
-  // Se o terminal foi indevidamente gravado como um transbordo (ex: UBERABA, TIUB, ATT ARMAZENAGEM, FERNANDOPOLIS):
-  if (/UBERABA|TIUB/i.test(item.terminal || '')) {
-    if (isNaoInformado(item.transbordo) || item.transbordo === item.terminal) {
-      transbordoCorrigido = 'UBERABA'
-      camposAjustados.push('transbordo')
-    }
-    terminalCorrigido = 'Não Informado'
-  } else if (/ATT\s*ARMAZENAGEM|FERNAND[OÓ]POLIS/i.test(item.terminal || '')) {
-    if (isNaoInformado(item.transbordo) || item.transbordo === item.terminal) {
-      transbordoCorrigido = 'FERNANDOPOLIS'
-      camposAjustados.push('transbordo')
-    }
-    terminalCorrigido = 'Não Informado'
-  }
-
-  // Se o transbordo foi indevidamente rotulado como terminal portuário (ex: TEAG, TEG, TES, CLI, TGG, SANTOS, GUARUJÁ):
-  if (/^TEAG\b|^TEG\b|^TES\b|^CLI\b|^TGG\b|^TIPLAM\b|^BTP\b|SANTOS|GUARUJ[AÁ]/i.test(item.transbordo || '')) {
-    if (isNaoInformado(terminalCorrigido) || isNaoInformado(item.terminal)) {
-      terminalCorrigido = item.transbordo
-      camposAjustados.push('terminal')
-    }
-    transbordoCorrigido = undefined
-  }
-
-  // Se o terminal foi rotulado como TEG mas a nota é de açúcar ou possui dados do TEAG, corrigir para TEAG
-  if (!explicitTerminalCode && item.terminal && item.terminal.includes('TEG') && !item.terminal.includes('TEAG')) {
-    if (/ACUCAR|AÇÚCAR|04\.?721\.?589\/?0001-?78|BENTO\s*PEDRO|335\.?127\.?598\.?119|TERMINAL.*EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR/i.test(fullText)) {
-      terminalCorrigido = 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
-      camposAjustados.push('terminal')
-    }
-  }
-
-  // 1. Auditoria e Identificação de Terminal de Entrega
-  if (!explicitTerminalCode && (isNaoInformado(terminalCorrigido) || isNaoInformado(item.terminal))) {
-    if (
-      /\bTEAG\b|TERMINAL.*EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR|ACUCAR.*GUARUJ[AÁ]|TEAG|04\.?721\.?589\/?0001-?78|335\.?127\.?598\.?119|BENTO\s*PEDRO\s*DA\s*COSTA/i.test(fullText) ||
-      ((/GUARUJ[AÁ]/i.test(fullText)) && (/ACUCAR|AÇÚCAR/i.test(fullText)))
-    ) {
-      terminalCorrigido = 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
-      camposAjustados.push('terminal')
-    } else if (/\bTES\b|TERMINAL.*EXPORTADOR.*SANTOS|TES\s*TERMINAL|18\.?845\.?076\/?0001-?83/i.test(fullText)) {
-      terminalCorrigido = 'TES - TERMINAL EXPORTADOR DE SANTOS'
-      camposAjustados.push('terminal')
-    } else if (/\bTEG\b|TERMINAL.*EXPORTADOR.*GUARUJ[AÁ]|TERM.*EXP.*GUARUJA/i.test(fullText)) {
-      terminalCorrigido = 'TEG - TERMINAL EXPORTADOR DO GUARUJA'
-      camposAjustados.push('terminal')
-    } else if (/\bCLI\b|CORREDOR.*LOG[IÍ]STIC.*INTEGRAD/i.test(fullText)) {
-      terminalCorrigido = 'CLI - CORREDOR LOGÍSTICA INTEGRADA'
-      camposAjustados.push('terminal')
-    } else if (/\bTGG\b|TERMINAL.*GR[AÃ]OS.*GUARUJ[AÁ]/i.test(fullText)) {
-      terminalCorrigido = 'TGG - TERMINAL DE GRAOS DO GUARUJA'
-      camposAjustados.push('terminal')
-    } else if (/\bT-124\b|\bT124\b|TERMINAL.*124/i.test(fullText)) {
-      terminalCorrigido = 'TERMINAL 124'
-      camposAjustados.push('terminal')
-    } else if (/SANTOS BRASIL/i.test(fullText)) {
-      terminalCorrigido = 'SANTOS BRASIL'
-      camposAjustados.push('terminal')
-    } else if (/DP WORLD/i.test(fullText)) {
-      terminalCorrigido = 'DP WORLD SANTOS'
-      camposAjustados.push('terminal')
-    } else if (/ECOPORTO/i.test(fullText)) {
-      terminalCorrigido = 'ECOPORTO SANTOS'
-      camposAjustados.push('terminal')
-    } else if (/BTP|BRASIL TERMINAL PORTU/i.test(fullText)) {
-      terminalCorrigido = 'BTP - BRASIL TERMINAL PORTUARIO'
-      camposAjustados.push('terminal')
-    } else if (/TIPLAM/i.test(fullText)) {
-      terminalCorrigido = 'TIPLAM - TERMINAL INTEGRADO'
-      camposAjustados.push('terminal')
-    } else if (/TERMINAL RUMO|RUMO MALHA/i.test(fullText)) {
-      terminalCorrigido = 'TERMINAL RUMO'
-      camposAjustados.push('terminal')
-    } else if (/TERMINAL VLI|VLI/i.test(fullText)) {
-      terminalCorrigido = 'TERMINAL VLI'
-      camposAjustados.push('terminal')
-    } else if (/GUARUJ[AÁ]/i.test(fullText)) {
-      if (/ACUCAR|AÇÚCAR/i.test(fullText)) {
-        terminalCorrigido = 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
-      } else {
-        terminalCorrigido = 'TEG - TERMINAL EXPORTADOR DO GUARUJA'
-      }
-      camposAjustados.push('terminal')
-    }
-  }
 
   // 2. Auditoria e Identificação de Transbordo (Validação prioritária de Pradópolis, Pederneiras e outros cadastrados)
   const isTransbordoInvalidoOuVazio =

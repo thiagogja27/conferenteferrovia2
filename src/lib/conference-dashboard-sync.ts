@@ -23,7 +23,7 @@ import {
   formatTimeBR,
 } from '@/lib/firebase-realtime'
 import { matchTransbordoFromText } from '@/lib/cadastros-logisticos-service'
-import { getExplicitGuarujaTerminalCode } from '@/lib/terminal-utils'
+import { getExplicitGuarujaTerminalCode, isUltrafertil, extractTerminalFromDeliveryRule } from '@/lib/terminal-utils'
 import { ref, push, onValue, off, query, limitToLast, remove, get } from 'firebase/database'
 
 export interface ConferenceNoteSummary {
@@ -278,11 +278,13 @@ export function buildConferenceDashboardSnapshot(
     let terminal = nfe?.terminalEntrega || parsed?.terminalEntrega || 'Não Informado'
     let transbordo = nfe?.transbordo || parsed?.transbordo || 'Não Informado'
     const retirada = parsed?.retirada || ''
-    const explicitTerminalCode = getExplicitGuarujaTerminalCode(`${infCpl} ${rawXml} ${f.rawSnippet || ''}`)
-    if (explicitTerminalCode === 'TEAG') {
-      terminal = 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
-    } else if (explicitTerminalCode === 'TEG') {
-      terminal = 'TEG - TERMINAL EXPORTADOR DO GUARUJA'
+    const fullDocText = `${infCpl} ${rawXml} ${f.rawSnippet || ''}`
+
+    if (terminal === 'Não Informado' || !terminal) {
+      const deliveryRuleTerminal = extractTerminalFromDeliveryRule(fullDocText)
+      if (deliveryRuleTerminal) {
+        terminal = deliveryRuleTerminal
+      }
     }
 
     // Se o terminal capturado foi UBERABA / TIUB, corrigir para transbordo
@@ -298,30 +300,15 @@ export function buildConferenceDashboardSnapshot(
       terminal = 'Não Informado'
     }
 
-    // CRÍTICO: Não existe transbordo TEG ou TEAG! TEAG, TEG, TES, CLI, TGG são terminais portuários.
-    // Se o transbordo foi indevidamente gravado como terminal portuário, mover para terminal e resetar transbordo!
-    if (/^TEAG\b|^TEG\b|^TES\b|^CLI\b|^TGG\b|^TIPLAM\b|^BTP\b|SANTOS|GUARUJ[AÁ]/i.test(transbordo)) {
+    // Se o transbordo for inválido e o terminal estiver vazio, buscar mecanicamente
+    if (/^TEAG\b|^TEG\b|^TES\b|^CLI\b|^TGG\b|^TIPLAM\b|^BTP\b|\bULTRAFERTIL\b|\bULTRAF[EÉ]RTIL\b|SANTOS|GUARUJ[AÁ]/i.test(transbordo)) {
       if (terminal === 'Não Informado' || !terminal) {
-        terminal = transbordo
+        const deliveryRuleTerminal = extractTerminalFromDeliveryRule(fullDocText)
+        if (deliveryRuleTerminal) {
+          terminal = deliveryRuleTerminal
+        }
       }
       transbordo = 'Não Informado'
-    }
-
-    // Se o terminal foi rotulado como TEG mas a nota é de açúcar, corrigir para TEAG
-    if (!explicitTerminalCode && terminal.includes('TEG') && !terminal.includes('TEAG')) {
-      if (/ACUCAR|AÇÚCAR|04\.?721\.?589\/?0001-?78|BENTO\s*PEDRO|335\.?127\.?598\.?119|TERMINAL.*EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR/i.test(`${infCpl} ${rawXml}`)) {
-        terminal = 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
-      }
-    }
-
-    // Detecção prioritária de TEAG
-    if (!explicitTerminalCode && (
-      /\bTEAG\b|TERMINAL.*EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR|ACUCAR.*GUARUJ[AÁ]|TEAG|04\.?721\.?589\/?0001-?78|335\.?127\.?598\.?119|BENTO\s*PEDRO/i.test(`${infCpl} ${rawXml}`) ||
-      ((/GUARUJ[AÁ]/i.test(`${infCpl} ${rawXml}`)) && (/ACUCAR|AÇÚCAR/i.test(`${infCpl} ${rawXml}`)))
-    )) {
-      terminal = 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
-    } else if (/\bTES\b|TERMINAL.*EXPORTADOR.*SANTOS|TES\s*TERMINAL|18\.?845\.?076\/?0001-?83/i.test(`${infCpl} ${rawXml}`)) {
-      terminal = 'TES - TERMINAL EXPORTADOR DE SANTOS'
     }
 
     // Validação prioritária de transbordos cadastrados (Pradópolis, Pederneiras, Fernandópolis, etc.)
@@ -350,7 +337,7 @@ export function buildConferenceDashboardSnapshot(
 
     if (logisticsOverridesInput && chave && logisticsOverridesInput[chave]) {
       const ov = logisticsOverridesInput[chave]
-      if (ov.terminal) terminal = ov.terminal
+      // Terminal é 100% mecânico e não é sobrescrito pela IA
       if (ov.transbordo) transbordo = ov.transbordo
       if (ov.destinatario) destNome = ov.destinatario
     }

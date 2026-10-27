@@ -9,7 +9,6 @@ import {
   AlertCircle,
   CheckCircle2,
   RefreshCw,
-  X,
 } from 'lucide-react'
 
 interface LoginScreenProps {
@@ -81,17 +80,6 @@ export function LoginScreen({ isModal = false, onClose }: LoginScreenProps) {
   return (
     <div className={containerClasses}>
       <div className="w-full max-w-sm bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl p-6 relative">
-        {onClose && (
-          <button
-            type="button"
-            onClick={onClose}
-            className="absolute top-4 right-4 p-1.5 rounded-xl text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors cursor-pointer"
-            title="Fechar"
-          >
-            <X className="h-5 w-5" />
-          </button>
-        )}
-
         {/* Cabeçalho Limpo e Direto */}
         <div className="text-center mb-6 pt-2">
           <div className="inline-flex items-center justify-center p-3 rounded-2xl bg-indigo-600/10 text-indigo-400 border border-indigo-500/20 mb-3">
@@ -192,33 +180,20 @@ export function LoginScreen({ isModal = false, onClose }: LoginScreenProps) {
               </div>
             </div>
 
-            <div className="space-y-2 mt-2">
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-semibold shadow-xs transition-colors flex items-center justify-center gap-2 cursor-pointer"
-              >
-                {loading ? (
-                  <>
-                    <RefreshCw className="h-4 w-4 animate-spin" />
-                    Entrando...
-                  </>
-                ) : (
-                  'Entrar'
-                )}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  signIn('portaria_balanca@tegporto.com.br', '@Bal120826')
-                  if (onClose) onClose()
-                }}
-                className="w-full py-2 px-3 rounded-xl border border-zinc-700 hover:border-zinc-500 text-zinc-300 hover:text-white text-xs font-medium transition-colors cursor-pointer"
-              >
-                Acessar Sistema Diretamente
-              </button>
-            </div>
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-semibold shadow-xs transition-colors flex items-center justify-center gap-2 cursor-pointer mt-2"
+            >
+              {loading ? (
+                <>
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  Entrando...
+                </>
+              ) : (
+                'Entrar'
+              )}
+            </button>
           </form>
         )}
 

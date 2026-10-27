@@ -1,5 +1,5 @@
 import { matchTransbordoFromText } from './cadastros-logisticos-service'
-import { getExplicitGuarujaTerminalCode } from './terminal-utils'
+import { getExplicitGuarujaTerminalCode, isUltrafertil, extractTerminalFromDeliveryRule } from './terminal-utils'
 
 export interface CNPJVerificationResult {
   chaveCnpj: string
@@ -262,7 +262,7 @@ function parseNFeData(doc: Document, tipo: "NFe" | "NFSe" | "Desconhecido"): NFE
   }
 
   // Data e hora
-const dhEmi = getTextContent(doc, "dhEmi", ide) || getTextContent(doc, "dEmi", ide)
+  const dhEmi = getTextContent(doc, "dhEmi", ide) || getTextContent(doc, "dEmi", ide)
   const dhSaiEnt = getTextContent(doc, "dhSaiEnt", ide) || getTextContent(doc, "dSaiEnt", ide)
   
   // Extrair informações complementares para análise
@@ -299,25 +299,25 @@ const dhEmi = getTextContent(doc, "dhEmi", ide) || getTextContent(doc, "dEmi", i
   const verificacaoCNPJ = verifyChaveCNPJ(chaveAcesso, emitCnpj, destCnpj)
 
   return {
-  tipo,
-  numero: getTextContent(doc, "nNF", ide),
-  serie: getTextContent(doc, "serie", ide),
-  dataEmissao: formatDate(dhEmi),
-  horaEmissao: formatTime(dhEmi),
-  dataEntradaSaida: formatDate(dhSaiEnt),
-  horaEntradaSaida: formatTime(dhSaiEnt) || formatTime(getTextContent(doc, "hSaiEnt", ide)),
-  chaveAcesso,
-  verificacaoCNPJ,
-  protocolo: protNFe ? getTextContent(doc, "nProt", protNFe as Element) : "",
-  naturezaOperacao: getTextContent(doc, "natOp", ide),
-  tipoOperacao: (getTextContent(doc, "tpNF", ide) as "0" | "1") || "1",
-  folha: "1/1",
-  // Campos extraídos das informações complementares
-  terminalEntrega: extractTerminalEntrega(informacoesComplementares),
-  transbordo: extractTransbordo(informacoesComplementares, `${getTextContent(doc, "xMun", enderEmit)} ${getTextContent(doc, "xNome", emit)} ${getTextContent(doc, "xMun", enderDest)}`),
-  retirada: extractRetirada(informacoesComplementares),
-  tipoProduto: detectTipoProduto(descricaoProdutos, informacoesComplementares),
-  emitente: {
+    tipo,
+    numero: getTextContent(doc, "nNF", ide),
+    serie: getTextContent(doc, "serie", ide),
+    dataEmissao: formatDate(dhEmi),
+    horaEmissao: formatTime(dhEmi),
+    dataEntradaSaida: formatDate(dhSaiEnt),
+    horaEntradaSaida: formatTime(dhSaiEnt) || formatTime(getTextContent(doc, "hSaiEnt", ide)),
+    chaveAcesso,
+    verificacaoCNPJ,
+    protocolo: protNFe ? getTextContent(doc, "nProt", protNFe as Element) : "",
+    naturezaOperacao: getTextContent(doc, "natOp", ide),
+    tipoOperacao: (getTextContent(doc, "tpNF", ide) as "0" | "1") || "1",
+    folha: "1/1",
+    // Campos extraídos das informações complementares
+    terminalEntrega: extractTerminalEntrega(informacoesComplementares, doc),
+    transbordo: extractTransbordo(informacoesComplementares, `${getTextContent(doc, "xMun", enderEmit)} ${getTextContent(doc, "xNome", emit)} ${getTextContent(doc, "xMun", enderDest)}`),
+    retirada: extractRetirada(informacoesComplementares),
+    tipoProduto: detectTipoProduto(descricaoProdutos, informacoesComplementares),
+    emitente: {
       cnpj: emitCnpj,
       nome: getTextContent(doc, "xNome", emit),
       nomeFantasia: getTextContent(doc, "xFant", emit),
@@ -414,16 +414,16 @@ function parseNFSeData(doc: Document, tipo: "NFe" | "NFSe" | "Desconhecido"): NF
     horaEmissao: formatTime(getTextContent(doc, "DataEmissao", infNfse)),
     dataEntradaSaida: "",
     horaEntradaSaida: "",
-chaveAcesso: getTextContent(doc, "CodigoVerificacao", infNfse),
-  protocolo: "",
-  naturezaOperacao: "Prestacao de Servicos",
-  tipoOperacao: "1",
-  folha: "1/1",
-  terminalEntrega: "",
-  transbordo: "",
-  retirada: "",
-  tipoProduto: "OUTRO",
-  emitente: {
+    chaveAcesso: getTextContent(doc, "CodigoVerificacao", infNfse),
+    protocolo: "",
+    naturezaOperacao: "Prestacao de Servicos",
+    tipoOperacao: "1",
+    folha: "1/1",
+    terminalEntrega: "",
+    transbordo: "",
+    retirada: "",
+    tipoProduto: "OUTRO",
+    emitente: {
       cnpj: formatCNPJ(getTextContent(doc, "Cnpj", prestador)),
       nome: getTextContent(doc, "RazaoSocial", prestador),
       nomeFantasia: getTextContent(doc, "NomeFantasia", prestador),
@@ -526,15 +526,15 @@ function parseGenericData(doc: Document, tipo: "NFe" | "NFSe" | "Desconhecido"):
     chaveAcesso: "",
     protocolo: "",
     naturezaOperacao: "",
-tipoOperacao: "1",
-  folha: "1/1",
-  terminalEntrega: "",
-  transbordo: "",
-  retirada: "",
-  tipoProduto: "OUTRO",
-  emitente: {
-  cnpj: "",
-  nome: "",
+    tipoOperacao: "1",
+    folha: "1/1",
+    terminalEntrega: "",
+    transbordo: "",
+    retirada: "",
+    tipoProduto: "OUTRO",
+    emitente: {
+      cnpj: "",
+      nome: "",
       nomeFantasia: "",
       endereco: "",
       numero: "",
@@ -654,10 +654,10 @@ function formatPhone(phone: string): string {
   if (!phone) return ""
   const cleaned = phone.replace(/\D/g, "")
   if (cleaned.length === 10) {
-  return cleaned.replace(/(\d{2})(\d{4})(\d{4})/, "($1) $2-$3")
+    return cleaned.replace(/(\d{2})(\d{4})(\d{4})/, "($1) $2-$3")
   }
   if (cleaned.length === 11) {
-  return cleaned.replace(/(\d{2})(\d{5})(\d{4})/, "($1) $2-$3")
+    return cleaned.replace(/(\d{2})(\d{5})(\d{4})/, "($1) $2-$3")
   }
   return phone
 }
@@ -758,151 +758,27 @@ export function verifyChaveCNPJ(
 }
 
 // Funções para extrair informações das informações complementares
-function extractTerminalEntrega(infComplementares: string): string {
-  if (!infComplementares) return ""
-
-  const uppercase = infComplementares.toUpperCase()
-  const explicitTerminalCode = getExplicitGuarujaTerminalCode(infComplementares)
-  if (explicitTerminalCode === 'TEAG') return 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
-  if (explicitTerminalCode === 'TEG') return 'TEG - TERMINAL EXPORTADOR DO GUARUJA'
-
-  // 1. Verificação por códigos/locais conhecidos em notas de exportação/agronegócio
-  // TEAG - TERMINAL DE ACUCAR DO GUARUJA (Prioridade Máxima)
-  if (
-    /\bTEAG\b/i.test(infComplementares) ||
-    uppercase.includes('04.721.589/0001-78') ||
-    infComplementares.includes('04721589000178') ||
-    infComplementares.includes('335127598119') ||
-    infComplementares.includes('335.127.598.119') ||
-    /TERMINAL.*EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR/i.test(infComplementares) ||
-    /TERMINAL.*A[CÇ][UÚ]CAR.*GUARUJ[AÁ]/i.test(infComplementares) ||
-    /TER.*EXP.*ACU[CÇ].*GUARUJ[AÁ]/i.test(infComplementares) ||
-    /EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR.*GUARUJ[AÁ]/i.test(infComplementares) ||
-    /BENTO\s*PEDRO\s*DA\s*COSTA/i.test(infComplementares) ||
-    /BENTOPEDRO\s*DA\s*COSTA/i.test(infComplementares) ||
-    ((uppercase.includes('GUARUJA') || uppercase.includes('GUARUJÁ')) && (uppercase.includes('ACUCAR') || uppercase.includes('AÇÚCAR')))
-  ) {
-    return 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
-  }
-
-  // TES - TERMINAL EXPORTADOR DE SANTOS
-  if (
-    /\bTES\b/i.test(infComplementares) ||
-    uppercase.includes('TERMINAL EXPORTADOR DE SANTOS') ||
-    uppercase.includes('TES TERMINAL') ||
-    uppercase.includes('18.845.076/0001-83') ||
-    infComplementares.includes('18845076000183')
-  ) {
-    return 'TES - TERMINAL EXPORTADOR DE SANTOS'
-  }
-
-  // Extração direta do bloco "INFORMAÇÕES DO LOCAL DE ENTREGA" da DANFE ou tag <entrega>
-  const entregaSectionMatch = infComplementares.match(/(?:INFORMA[ÇC][ÕO]ES\s+DO\s+LOCAL\s+DE\s+ENTREGA|LOCAL\s+DE\s+ENTREGA|<entrega>)([\s\S]{1,600}?)(?:C[ÁA]LCULO\s+DO\s+IMPOSTO|DADOS\s+DOS\s+PRODUTOS|TRANSPORTADOR|<\/entrega>|$)/i)
-  if (entregaSectionMatch && entregaSectionMatch[1]) {
-    const sec = entregaSectionMatch[1]
-    const secUpper = sec.toUpperCase()
-    if (
-      /\bTEAG\b/i.test(sec) ||
-      secUpper.includes('04.721.589/0001-78') ||
-      sec.includes('04721589000178') ||
-      sec.includes('335127598119') ||
-      sec.includes('335.127.598.119') ||
-      /TERMINAL.*EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR/i.test(sec) ||
-      /TERMINAL.*A[CÇ][UÚ]CAR/i.test(sec) ||
-      /ACUCAR.*GUARUJ/i.test(sec) ||
-      /BENTO\s*PEDRO/i.test(sec) ||
-      ((secUpper.includes('GUARUJA') || secUpper.includes('GUARUJÁ')) && (secUpper.includes('ACUCAR') || secUpper.includes('AÇÚCAR')))
-    ) {
-      return 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
-    }
-    if (/\bTES\b/i.test(sec) || secUpper.includes('TERMINAL EXPORTADOR DE SANTOS') || secUpper.includes('TES TERMINAL') || sec.includes('18.845.076/0001-83') || sec.includes('18845076000183')) {
-      return 'TES - TERMINAL EXPORTADOR DE SANTOS'
-    }
-    if (/\bTEG\b/i.test(sec) || secUpper.includes('TERMINAL EXPORTADOR DO GUARUJA') || secUpper.includes('TEG')) {
-      return 'TEG - TERMINAL EXPORTADOR DO GUARUJA'
-    }
-    if (/\bTGG\b/i.test(sec) || secUpper.includes('TERMINAL DE GRA') || secUpper.includes('TGG')) {
-      return 'TGG - TERMINAL DE GRAIS DO GUARUJA'
-    }
-    if (/\bCLI\b/i.test(sec) || secUpper.includes('CORREDOR LOGISTICO')) {
-      return 'CLI - CORREDOR LOGISTICO INTEGRADO'
+function extractTerminalEntrega(infComplementares: string, doc?: Document): string {
+  // 1. Extração mecânica das observações / infComplementares pelas até 15 palavras após o marcador
+  if (infComplementares) {
+    const fromDeliveryRule = extractTerminalFromDeliveryRule(infComplementares)
+    if (fromDeliveryRule) {
+      return fromDeliveryRule
     }
   }
 
-  // Extração explícita de "ENTREGA: ..." das Informações Complementares
-  const entregaInfCplMatches = infComplementares.match(/(?:LOCAL\s+DE\s+ENTREGA|ENTREGA)\s*[:=-]\s*([^\n\r,;]{3,120})/gi)
-  if (entregaInfCplMatches) {
-    for (const matchStr of entregaInfCplMatches) {
-      const rawEntrega = matchStr.toUpperCase()
-      if (/\bTEAG\b|TERMINAL.*A[CÇ][UÚ]CAR|ACUCAR.*GUARUJ|04\.?721\.?589\/?0001-?78|BENTO\s*PEDRO/i.test(rawEntrega)) {
-        return 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
-      }
-      if (/\bTES\b|TERMINAL.*EXPORTADOR.*SANTOS/i.test(rawEntrega)) {
-        return 'TES - TERMINAL EXPORTADOR DE SANTOS'
+  // 2. Se houver tag XML <entrega>, extrair mecanicamente o nome do local
+  if (doc) {
+    const entregaEl = doc.getElementsByTagName("entrega")[0]
+    if (entregaEl) {
+      const entregaNome = getTextContent(doc, "xNome", entregaEl)
+      if (entregaNome && entregaNome.trim()) {
+        const words = entregaNome.trim().split(/\s+/).filter(Boolean).slice(0, 15)
+        if (words.length > 0) return words.join(' ')
       }
     }
   }
 
-  if (/\bTEG\b/i.test(infComplementares) || uppercase.includes('TERMINAL EXPORTADOR DO GUARUJA') || uppercase.includes('TERM EXP GUARUJA') || uppercase.includes('GUARUJA LTDA GUARUJA')) {
-    return 'TEG - TERMINAL EXPORTADOR DO GUARUJA'
-  }
-  if (/\bTGG\b/i.test(infComplementares) || uppercase.includes('TERMINAL DE GRAIS DO GUARUJA') || uppercase.includes('TERMINAL DE GRAOS DO GUARUJA')) {
-    return 'TGG - TERMINAL DE GRAIS DO GUARUJA'
-  }
-  if (/\bTAC\b/i.test(infComplementares) || uppercase.includes('TERMINAL DE ARMAZENS')) {
-    return 'TAC - TERMINAL DE ARMAZENS'
-  }
-  if (/\bCLI\b/i.test(infComplementares) || uppercase.includes('CORREDOR LOGISTICO INTEGRADO')) {
-    return 'CLI - CORREDOR LOGISTICO INTEGRADO'
-  }
-  if (uppercase.includes('SANTOS BRASIL')) return 'SANTOS BRASIL'
-  if (uppercase.includes('DP WORLD')) return 'DP WORLD SANTOS'
-  if (uppercase.includes('ECOPORTO')) return 'ECOPORTO SANTOS'
-  if (uppercase.includes('BTP') || uppercase.includes('BRASIL TERMINAL PORTUARIO')) return 'BTP - BRASIL TERMINAL PORTUARIO'
-  if (uppercase.includes('TIPLAM')) return 'TIPLAM - TERMINAL INTEGRADO'
-
-  // 2. Trazer até 15 primeiras palavras depois de ALFANDEGADO, ALFADEGADO, RECINTO ou ENTREGA (não usar "TERMINAL" isolado para evitar transbordos)
-  const regex = /(?:RECINTO\s+ALFANDEGADO|RECINTO\s+ALFADEGADO|ALFANDEGADO|ALFADEGADO|TERMINAL\s+DE\s+ENTREGA|TERMINAL\s+ENTREGA|LOCAL\s+DE\s+ENTREGA|LOCAL\s+DE\s+DESCARGA|DESCARGA\s+NO\s+RECINTO|TERMINAL\s+EXPORTADOR|ENTREGA\s+EM|ENTREGA)\s*[:=-]?\s*([\s\S]{1,500})/i
-
-  const match = infComplementares.match(regex)
-  if (match && match[1]) {
-    let chunk = match[1].trim()
-    chunk = chunk.replace(/^(?:EM|DE|NO|NA|SERA|SERÁ|RECINTO|ALFANDEGADO|ALFADEGADO)\s*[:=-]?\s*/i, "")
-    const stopKeywords = [
-      "TRANSBORDO", "RETIRADA", "PLACA", "MOTORISTA", "CONTRATO",
-      "DESTINO", "CNPJ", "CPF", "OBS", "VALOR", "PESO", "QTD", "QUANTIDADE",
-      "TICKET", "NAVIO", "SAFRA", "PEDIDO", "NOTA FISCAL", "CHAVE", "DATA", "CEP", "IE"
-    ]
-    for (const kw of stopKeywords) {
-      const idx = chunk.toUpperCase().indexOf(kw)
-      if (idx > 0) {
-        chunk = chunk.substring(0, idx).trim()
-      }
-    }
-    const words = chunk.split(/\s+/).filter(Boolean).slice(0, 15)
-    let val = words.join(' ').replace(/[:=\-.,;]+$/, '').trim()
-    val = val.replace(/^(?:NOME\s*\/\s*RAZ[ÃA]O\s*SOCIAL|ME\s*\/\s*RAZ[ÃA]O\s*SOCIAL|RAZ[ÃA]O\s*SOCIAL|NOME)\s*[:=-]?\s*/i, '').trim()
-
-    // Se tiver relação com TEAG ou açúcar no Guarujá
-    if (/TERMINAL.*EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR|ACUCAR.*GUARUJ|04\.?721\.?589\/?0001-?78|BENTO\s*PEDRO/i.test(val)) {
-      return 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
-    }
-
-    // Se o valor capturado for um transbordo conhecido (ex: UBERABA, TIUB, FERNANDOPOLIS, ATT ARMAZENAGEM), NÃO é o terminal de entrega!
-    const valUpper = val.toUpperCase()
-    const isTransbordoHub = /UBERABA|TIUB|FERNANDOPOLIS|FERNANDÓPOLIS|ATT\s*ARMAZENAGEM|RONDONOPOLIS|RIO VERDE|ARAGUARI|ITURAMA|PRADOPOLIS|PEDERNEIRAS|SAO SIMAO|UBERLANDIA|INOCENCIA/i.test(valUpper)
-    if (!isTransbordoHub && val.length > 2 && !/^\d+$/.test(val)) {
-      return val
-    }
-  }
-
-  if (uppercase.includes('GUARUJA') || uppercase.includes('GUARUJÁ')) {
-    if (uppercase.includes('ACUCAR') || uppercase.includes('AÇÚCAR')) {
-      return 'TEAG - TERMINAL DE ACUCAR DO GUARUJA'
-    }
-    return 'TEG - TERMINAL EXPORTADOR DO GUARUJA'
-  }
-  if (uppercase.includes('SANTOS')) return 'TERMINAL SANTOS'
   return ""
 }
 

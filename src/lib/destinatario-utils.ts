@@ -63,23 +63,28 @@ export function sanitizeDestinatarioNome(
     !nome ||
     nome.length < 3 ||
     nome === 'DESTINATARIO NAO IDENTIFICADO' ||
-    /QUANTIDADE|ESP[EÉ]CIE|PESO|MARCA|N[UÚ]MERO|VOLUMES|TRANSPORTADOR|FRETE|C[AÁ]LCULO|BASE|VALOR/i.test(nome) ||
+    /QUANTIDADE|ESP[EÉ]CIE|PESO|MARCA|N[UÚ]MERO|VOLUMES|TRANSPORTADOR|FRETE|C[AÁ]LCULO|BASE|VALOR|-?ENTRADA|-?SA[IÍ]DA|DOCUMENTOAUXILIAR/i.test(nome) ||
     (cnpjClean && emitCnpjClean && (cnpjClean === emitCnpjClean || cnpjClean.slice(0, 8) === emitCnpjClean.slice(0, 8)))
 
-  if (isSameCompanyOrEmpty && fallbackEmitNome) {
-    const cleanEmit = fallbackEmitNome
-      .trim()
-      .replace(/[:=\-.,;/]+$/, '')
-      .trim()
-    if (cleanEmit.length >= 3 && !/QUANTIDADE|ESP[EÉ]CIE|VOLUMES/i.test(cleanEmit)) {
-      return cleanEmit.toUpperCase()
+  if (isSameCompanyOrEmpty) {
+    if (emitCnpjClean.startsWith('60498706')) {
+      return 'CARGILL AGRICOLA SA'
+    }
+    if (fallbackEmitNome) {
+      const cleanEmit = fallbackEmitNome
+        .trim()
+        .replace(/[:=\-.,;/]+$/, '')
+        .trim()
+      if (cleanEmit.length >= 3 && !/QUANTIDADE|ESP[EÉ]CIE|VOLUMES|-?ENTRADA|-?SA[IÍ]DA|DOCUMENTOAUXILIAR|S[EÉ]RIE/i.test(cleanEmit)) {
+        return cleanEmit.toUpperCase()
+      }
     }
   }
 
   if (
     !nome ||
     nome.length < 3 ||
-    /QUANTIDADE|ESP[EÉ]CIE|PESO|MARCA|N[UÚ]MERO|VOLUMES|TRANSPORTADOR|FRETE|C[AÁ]LCULO|BASE|VALOR/i.test(nome)
+    /QUANTIDADE|ESP[EÉ]CIE|PESO|MARCA|N[UÚ]MERO|VOLUMES|TRANSPORTADOR|FRETE|C[AÁ]LCULO|BASE|VALOR|-?ENTRADA|-?SA[IÍ]DA|DOCUMENTOAUXILIAR/i.test(nome)
   ) {
     return 'Não informado'
   }

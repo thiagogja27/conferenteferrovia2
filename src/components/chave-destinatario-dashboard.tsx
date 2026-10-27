@@ -105,8 +105,6 @@ export function ChaveDestinatarioDashboard({
   const [copiedListMsg, setCopiedListMsg] = useState<string | null>(null)
   const [sortBy, setSortBy] = useState<'numero' | 'valor' | 'status'>('status')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
-  const [aiAuditing, setAiAuditing] = useState(false)
-  const [aiAuditMessage, setAiAuditMessage] = useState<string | null>(null)
 
   const [cadastrosVersion, setCadastrosVersion] = useState(0)
   useEffect(() => {
@@ -157,9 +155,9 @@ export function ChaveDestinatarioDashboard({
 
       let rawDestCnpj = (nfe?.destinatario?.cpfCnpj || parsed?.destCNPJ || '').replace(/\D/g, '')
 
-      // Se o CNPJ pertencer a transportadora cadastrada, NÃO é destinatário!
+      // Se o CNPJ pertencer a transportadora cadastrada (ex: 10.991.380 Liderança ou 02.387.241 Rumo), NÃO é destinatário!
       if (isCarrierCnpj(rawDestCnpj)) {
-        if (rawEmitCnpj) {
+        if (rawDestNome && /SAO\s*MARTINHO/i.test(rawDestNome) && rawEmitCnpj) {
           rawDestCnpj = rawEmitCnpj
         } else {
           rawDestCnpj = ''
@@ -167,20 +165,11 @@ export function ChaveDestinatarioDashboard({
       }
 
       const infCpl = `${nfe?.informacoesComplementares || ''} ${parsed?.infCpl || ''} ${rawXml} ${f.rawSnippet || ''}`
-      let destNome = sanitizeDestinatarioNome(rawDestNome, rawDestCnpj, infCpl, emitNome, rawEmitCnpj)
-
-      // Se o destinatário não foi informado separadamente ou é a própria usina/remetente
-      if ((!destNome || destNome === 'Não informado' || destNome === 'DESTINATÁRIO NÃO IDENTIFICADO') && emitNome && emitNome !== 'Não informado') {
-        destNome = emitNome.toUpperCase()
-      }
-
-      if (!rawDestCnpj && rawEmitCnpj && (destNome === emitNome.toUpperCase() || destNome === emitNome)) {
-        rawDestCnpj = rawEmitCnpj
-      }
+      let destNome = sanitizeDestinatarioNome(rawDestNome, rawDestCnpj, infCpl)
 
       // Se ainda contiver cabeçalho de volume, limpa
       if (/QUANTIDADE.*(?:ESP[EÉ]CIE|PESO|MARCA|N[UÚ]MERO)|PESO\s+BRUTO/i.test(destNome)) {
-        destNome = emitNome && emitNome !== 'Não informado' ? emitNome.toUpperCase() : 'Não informado'
+        destNome = 'Não informado'
       }
 
       const destCNPJFormatted = formatCNPJ(rawDestCnpj)
@@ -405,30 +394,6 @@ export function ChaveDestinatarioDashboard({
       })
   }, [items, filterStatus, selectedDestinatario, selectedEmitente, searchTerm, sortBy, sortOrder])
 
-  const handleAiCnpjAudit = async () => {
-    if (items.length === 0 || aiAuditing) return
-    setAiAuditing(true)
-    setAiAuditMessage(null)
-    try {
-      const response = await fetch('/api/gemini/audit-cnpj-recipient', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items }),
-      })
-      const data = await response.json()
-      if (!response.ok) throw new Error(data.error || 'Falha na auditoria')
-      const results = Array.isArray(data.resultados) ? data.resultados : []
-      const divergentes = results.filter((r: any) => r.veredito === 'DIVERGENTE').length
-      const conformes = results.filter((r: any) => r.veredito === 'CONFORME').length
-      const semDados = results.filter((r: any) => r.veredito === 'NAO_INFORMADO').length
-      setAiAuditMessage(`Auditoria IA concluída: ${conformes} conformes, ${divergentes} divergentes e ${semDados} sem CNPJ confiável. A IA não considera Inscrição Estadual ou dados adicionais como destinatário.`)
-    } catch (error) {
-      setAiAuditMessage(error instanceof Error ? error.message : 'Não foi possível concluir a auditoria IA.')
-    } finally {
-      setAiAuditing(false)
-    }
-  }
-
   // Ações de cópia
   const handleCopyKey = (chave: string) => {
     if (!chave) return
@@ -463,24 +428,11 @@ export function ChaveDestinatarioDashboard({
   const handleExportExcel = () => {
     if (items.length === 0) return
 
-    const rows = filteredItems.map((item) => {
-      // Recalcula o status no momento da exportação usando somente o CNPJ
-      // oficial da chave e o CNPJ fiscal do destinatário. Isso evita exportar
-      // o status antigo calculado antes da normalização do PDF/cadastro.
-      const chaveCnpj = item.chaveCnpjRaw.replace(/\D/g, '')
-      const destinatarioCnpj = item.destCNPJ.replace(/\D/g, '')
-      const exportConfronto =
-        chaveCnpj.length === 14 && destinatarioCnpj.length === 14
-          ? chaveCnpj === destinatarioCnpj
-            ? 'IGUAIS'
-            : 'DIVERGENTES'
-          : 'NÃO INFORMADO'
-
-      return {
+    const rows = filteredItems.map((item) => ({
       Status:
-        exportConfronto === 'DIVERGENTES'
+        item.confronto === 'DIVERGENTES'
           ? 'DIVERGENTE (Chave ≠ Destinatário)'
-          : exportConfronto === 'IGUAIS'
+          : item.confronto === 'IGUAIS'
           ? 'CONFORME (Chave = Destinatário)'
           : 'NÃO INFORMADO',
       'Número NF': item.numero,
@@ -499,8 +451,7 @@ export function ChaveDestinatarioDashboard({
       'Chave Pertence ao Emitente?': item.matchesEmitente ? 'SIM' : 'NÃO',
       'Diagnóstico / Detalhes': item.statusDetails,
       Arquivo: item.fileName,
-      }
-    })
+    }))
 
     const wb = XLSX.utils.book_new()
     const ws = XLSX.utils.json_to_sheet(rows)
@@ -587,16 +538,6 @@ export function ChaveDestinatarioDashboard({
           <Button
             type="button"
             size="sm"
-            onClick={handleAiCnpjAudit}
-            disabled={items.length === 0 || aiAuditing}
-            className="bg-violet-600 hover:bg-violet-700 text-white text-xs font-semibold flex items-center gap-1.5 shadow-sm cursor-pointer"
-          >
-            {aiAuditing ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-            {aiAuditing ? 'Auditando...' : 'Auditar CNPJ com IA'}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
             onClick={handleExportExcel}
             disabled={items.length === 0}
             className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5 shadow-sm cursor-pointer"
@@ -619,14 +560,6 @@ export function ChaveDestinatarioDashboard({
           )}
         </div>
       </div>
-
-      {aiAuditMessage && (
-        <div className="p-3 bg-violet-50 dark:bg-violet-950/40 border border-violet-200 dark:border-violet-800 rounded-xl text-xs text-violet-900 dark:text-violet-200 flex items-center gap-2">
-          <Sparkles className="h-4 w-4 text-violet-600 shrink-0" />
-          <span>{aiAuditMessage}</span>
-          <button type="button" onClick={() => setAiAuditMessage(null)} className="ml-auto text-violet-600 hover:text-violet-900" aria-label="Fechar resultado da auditoria">×</button>
-        </div>
-      )}
 
       {/* Alerta de Cópia em Lote */}
       {copiedListMsg && (

@@ -1,5 +1,4 @@
-import { Type } from "@google/genai";
-import { getGatewayAI } from "./gateway-client";
+import { GoogleGenAI, Type } from "@google/genai";
 
 export const config = {
   api: {
@@ -270,7 +269,21 @@ export function auditarLogisticaHeuristicaLocal(item: LogisticsAuditInputItem): 
   };
 }
 
-const getGenAI = getGatewayAI;
+let genAiClient: GoogleGenAI | null = null;
+function getGenAI() {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!genAiClient && apiKey) {
+    genAiClient = new GoogleGenAI({
+      apiKey: apiKey,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
+      },
+    });
+  }
+  return genAiClient;
+}
 
 export default async function handler(req: any, res: any) {
   res.setHeader("Access-Control-Allow-Credentials", "true");
@@ -305,6 +318,21 @@ export default async function handler(req: any, res: any) {
     }
 
     const ai = getGenAI();
+
+    // Se a chave GEMINI_API_KEY não estiver configurada no ambiente Vercel, usa heurística local
+    if (!ai) {
+      const fallbackResults = items.map(auditarLogisticaHeuristicaLocal);
+      const totalAjustados = fallbackResults.filter((r) => r.camposAjustados.length > 0).length;
+      return res.status(200).json({
+        totalAuditados: fallbackResults.length,
+        totalAjustados,
+        totalSemDados: fallbackResults.length - totalAjustados,
+        resultados: fallbackResults,
+        tokensUtilizadosEstimados: 0,
+        provedor: "HEURISTICA_INTELIGENTE",
+        aviso: "GEMINI_API_KEY não configurada no ambiente Vercel. Processado com motor heurístico local.",
+      });
+    }
 
     const BATCH_SIZE = 40;
     const allAiParsedResults: any[] = [];

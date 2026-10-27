@@ -214,56 +214,71 @@ export const SISTEMA_DESTINATARIOS_PADRAO: CadastroDestinatario[] = [
   },
 
   {
-    id: 'sys-dest-ldc-0199-84',
+    id: 'sys-dest-ldc-0145-91',
     nome: 'LOUIS DREYFUS COMPANY BRASIL S A.',
-    cnpjPrincipal: '47.067.525/0199-84',
-    cnpjsAdicionais: [],
-    aliases: ['CARGILL AGRICOLA', 'CARGILL'],
+    cnpjPrincipal: '47.067.525/0145-91',
+    cnpjsAdicionais: ['47067525014591'],
+    aliases: ['LOUIS DREYFUS', 'LOUIS DREUFUS', 'LDC', 'LDC BRASIL', 'PEDERNEIRAS', 'DREYFUS'],
     isSistema: true,
     ativo: true,
     criadoEm: 1700000000000,
   },
-
+  {
+    id: 'sys-dest-ldc-0132-77',
+    nome: 'LOUIS DREYFUS COMPANY BRASIL S A.',
+    cnpjPrincipal: '47.067.525/0132-77',
+    cnpjsAdicionais: ['47067525013277'],
+    aliases: ['LOUIS DREYFUS', 'LOUIS DREUFUS', 'LDC', 'LDC BRASIL', 'CAMPO VERDE', 'DREYFUS'],
+    isSistema: true,
+    ativo: true,
+    criadoEm: 1700000000000,
+  },
+  {
+    id: 'sys-dest-ldc-0199-84',
+    nome: 'LOUIS DREYFUS COMPANY BRASIL S A.',
+    cnpjPrincipal: '47.067.525/0199-84',
+    cnpjsAdicionais: ['47067525019984'],
+    aliases: ['LOUIS DREYFUS', 'LOUIS DREUFUS', 'LDC', 'LDC BRASIL', 'DREYFUS'],
+    isSistema: true,
+    ativo: true,
+    criadoEm: 1700000000000,
+  },
   {
     id: 'sys-dest-ldc-0168-88',
     nome: 'LOUIS DREYFUS COMPANY BRASIL S A.',
     cnpjPrincipal: '47.067.525/0168-88',
-    cnpjsAdicionais: ['0675250168'],
-    aliases: ['CARGILL AGRICOLA', 'CARGILL'],
+    cnpjsAdicionais: ['0675250168', '47067525016888'],
+    aliases: ['LOUIS DREYFUS', 'LOUIS DREUFUS', 'LDC', 'LDC BRASIL', 'DREYFUS'],
     isSistema: true,
     ativo: true,
     criadoEm: 1700000000000,
   },
-
   {
     id: 'sys-dest-ldc-0112-23',
     nome: 'LOUIS DREYFUS COMPANY BRASIL S A.',
     cnpjPrincipal: '47.067.525/0112-23',
-    cnpjsAdicionais: ['0675250112'],
-    aliases: ['CARGILL AGRICOLA', 'CARGILL'],
+    cnpjsAdicionais: ['0675250112', '47067525011223'],
+    aliases: ['LOUIS DREYFUS', 'LOUIS DREUFUS', 'LDC', 'LDC BRASIL', 'DREYFUS'],
     isSistema: true,
     ativo: true,
     criadoEm: 1700000000000,
   },
-
-
-   {
+  {
     id: 'sys-dest-ldc-0130-05',
     nome: 'LOUIS DREYFUS COMPANY BRASIL S A.',
     cnpjPrincipal: '47.067.525/0130-05',
-    cnpjsAdicionais: ['0675250130'],
-    aliases: ['CARGILL AGRICOLA', 'CARGILL'],
+    cnpjsAdicionais: ['0675250130', '47067525013005'],
+    aliases: ['LOUIS DREYFUS', 'LOUIS DREUFUS', 'LDC', 'LDC BRASIL', 'DREYFUS'],
     isSistema: true,
     ativo: true,
     criadoEm: 1700000000000,
   },
-
   {
     id: 'sys-dest-ldc-0107-66',
     nome: 'LOUIS DREYFUS COMPANY BRASIL S A',
     cnpjPrincipal: '47.067.525/0107-66',
-    cnpjsAdicionais: ['0675250107'],
-    aliases: ['CARGILL AGRICOLA', 'CARGILL'],
+    cnpjsAdicionais: ['0675250107', '47067525010766'],
+    aliases: ['LOUIS DREYFUS', 'LOUIS DREUFUS', 'LDC', 'LDC BRASIL', 'DREYFUS'],
     isSistema: true,
     ativo: true,
     criadoEm: 1700000000000,
@@ -394,16 +409,7 @@ export const SISTEMA_DESTINATARIOS_PADRAO: CadastroDestinatario[] = [
     ativo: true,
     criadoEm: 1700000000000,
   },
-  {
-    id: 'sys-dest-copersucar',
-    nome: 'COPERSUCAR S.A.',
-    cnpjPrincipal: '60.643.236/0001-08',
-    cnpjsAdicionais: ['60643236'],
-    aliases: ['COPERSUCAR', 'COPERSUCAR SA', 'COPERSUCAR S/A'],
-    isSistema: true,
-    ativo: true,
-    criadoEm: 1700000000000,
-  },
+  
   {
     id: 'sys-dest-raizen',
     nome: 'RAIZEN ENERGIA S.A.',
@@ -1345,7 +1351,7 @@ export function resolveDestinatarioCadastro(
   const matches = allDest.flatMap((dest) => {
     const candidates = [dest.nome, ...(dest.aliases || [])]
       .map(normalizeSearch)
-      .filter((candidate) => candidate.length >= 6 && targetName.includes(candidate))
+      .filter((candidate) => candidate.length >= 3 && (targetName.includes(candidate) || candidate.includes(targetName)))
     const longestMatch = candidates.sort((a, b) => b.length - a.length)[0]
     return longestMatch ? [{ dest, matchLength: longestMatch.length }] : []
   }).sort((a, b) => b.matchLength - a.matchLength)
@@ -1355,7 +1361,7 @@ export function resolveDestinatarioCadastro(
 
   return {
     nome: match.dest.nome,
-    cnpj: '',
+    cnpj: cleanDigits(match.dest.cnpjPrincipal) || '',
   }
 }
 

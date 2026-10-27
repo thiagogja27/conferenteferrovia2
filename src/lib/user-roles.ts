@@ -341,39 +341,24 @@ export function subscribeAllUsersWithDepartments(
   }
 
   const usersRef = ref(db, 'vlic_telemetry/users')
-  const unsub = onValue(
-    usersRef,
-    (snap) => {
-      if (snap.exists()) {
-        const data = snap.val()
-        const userList: UserDatabaseProfile[] = Object.values(data)
-        // Ordena: supervisores primeiro, depois por nome
-        userList.sort((a, b) => {
-          if (a.departamento === 'supervisor' && b.departamento !== 'supervisor') return -1
-          if (b.departamento === 'supervisor' && a.departamento !== 'supervisor') return 1
-          return (a.displayName || a.email || '').localeCompare(b.displayName || b.email || '')
-        })
-        try {
-          localStorage.setItem(STORAGE_KEY_ALL_USERS, JSON.stringify(userList))
-        } catch (e) {
-          // ignore
-        }
-        callback(userList)
-      } else {
-        // Nenhum usuário no banco ainda, gera lista padrão com os supervisores iniciais
-        const defaults: UserDatabaseProfile[] = DEFAULT_SUPERVISOR_EMAILS.map((em, idx) => ({
-          uid: `default_sup_${idx}`,
-          email: em,
-          displayName: em.split('@')[0],
-          departamento: 'supervisor',
-          cargo: 'Supervisor Operacional',
-          lastLogin: Date.now(),
-        }))
-        callback(defaults)
+  const unsub = onValue(usersRef, (snap) => {
+    if (snap.exists()) {
+      const data = snap.val()
+      const userList: UserDatabaseProfile[] = Object.values(data)
+      // Ordena: supervisores primeiro, depois por nome
+      userList.sort((a, b) => {
+        if (a.departamento === 'supervisor' && b.departamento !== 'supervisor') return -1
+        if (b.departamento === 'supervisor' && a.departamento !== 'supervisor') return 1
+        return (a.displayName || a.email || '').localeCompare(b.displayName || b.email || '')
+      })
+      try {
+        localStorage.setItem(STORAGE_KEY_ALL_USERS, JSON.stringify(userList))
+      } catch (e) {
+        // ignore
       }
-    },
-    (err) => {
-      console.warn('Aviso ao sincronizar usuários do Firebase (usando lista local):', err?.message || err)
+      callback(userList)
+    } else {
+      // Nenhum usuário no banco ainda, gera lista padrão com os supervisores iniciais
       const defaults: UserDatabaseProfile[] = DEFAULT_SUPERVISOR_EMAILS.map((em, idx) => ({
         uid: `default_sup_${idx}`,
         email: em,
@@ -384,7 +369,7 @@ export function subscribeAllUsersWithDepartments(
       }))
       callback(defaults)
     }
-  )
+  })
 
   return () => unsub()
 }

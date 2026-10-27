@@ -2,7 +2,6 @@ import {
   resolveDestinatarioCadastro,
   resolveSavedNoteDestinatario,
 } from './cadastros-logisticos-service'
-import { enrichRecipientCadastroFromNfe } from './cadastro-recipient-enrichment'
 import type { NFEData } from './nfe-parser'
 import {
   generateNFeXML,
@@ -13,11 +12,6 @@ import {
 export function normalizeNfeRecipient<T extends NFEData>(nfeData: T): T {
   const rawCnpj = nfeData.destinatario?.cpfCnpj || ''
   if (rawCnpj.replace(/\D/g, '').length !== 14) return nfeData
-
-  // Atualiza apenas cadastros personalizados sem nome; nunca sobrescreve um nome existente.
-  void enrichRecipientCadastroFromNfe(rawCnpj, nfeData.destinatario?.nome).catch((error) => {
-    console.warn('[Cadastro] Não foi possível enriquecer destinatário:', error)
-  })
 
   const recipient = resolveDestinatarioCadastro(undefined, rawCnpj)
   if (!recipient) return nfeData
@@ -39,10 +33,6 @@ export async function prioritizeSavedRecipient<T extends {
   const parsedData = item.parsedData
   if (!parsedData) return item
 
-  void enrichRecipientCadastroFromNfe(parsedData.destCNPJ, parsedData.destNome).catch((error) => {
-    console.warn('[Cadastro] Não foi possível enriquecer destinatário:', error)
-  })
-
   const recipient =
     resolveDestinatarioCadastro(parsedData.destNome, parsedData.destCNPJ) ||
     (await resolveSavedNoteDestinatario(
@@ -51,21 +41,25 @@ export async function prioritizeSavedRecipient<T extends {
       parsedData.rawSnippet
     ))
 
-  let updatedData = recipient
+  const hasExtractedCnpj = Boolean(
+    parsedData.destCNPJ && parsedData.destCNPJ.replace(/\D/g, '').length === 14
+  )
+
+  const updatedData = recipient
     ? {
         ...parsedData,
-        destNome: recipient.nome,
-        destCNPJ: recipient.cnpj ? formatCNPJStr(recipient.cnpj) : parsedData.destCNPJ,
+        destNome: recipient.nome || parsedData.destNome,
+        destCNPJ: hasExtractedCnpj
+          ? formatCNPJStr(parsedData.destCNPJ)
+          : recipient.cnpj
+          ? formatCNPJStr(recipient.cnpj)
+          : '',
       }
-    : parsedData
-
-  if ((!updatedData.destNome || updatedData.destNome === 'Não informado' || updatedData.destNome === 'DESTINATÁRIO NÃO IDENTIFICADO') && updatedData.emitNome) {
-    updatedData = {
-      ...updatedData,
-      destNome: updatedData.emitNome.toUpperCase(),
-      destCNPJ: updatedData.destCNPJ || updatedData.emitCNPJ || '',
-    }
-  }
+    : {
+        ...parsedData,
+        destNome: parsedData.destNome || 'Não informado',
+        destCNPJ: parsedData.destCNPJ || '',
+      }
 
   return {
     ...item,

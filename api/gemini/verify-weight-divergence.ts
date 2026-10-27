@@ -1,5 +1,4 @@
-import { Type } from "@google/genai";
-import { getGatewayAI } from "./gateway-client";
+import { GoogleGenAI, Type } from "@google/genai";
 
 export const config = {
   api: {
@@ -158,7 +157,21 @@ export function auditarHeuristicaLocal(item: WeightAuditItemInput): WeightAuditI
   };
 }
 
-const getGenAI = getGatewayAI;
+let genAiClient: GoogleGenAI | null = null;
+function getGenAI() {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!genAiClient && apiKey) {
+    genAiClient = new GoogleGenAI({
+      apiKey: apiKey,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
+      },
+    });
+  }
+  return genAiClient;
+}
 
 export default async function handler(req: any, res: any) {
   res.setHeader("Access-Control-Allow-Credentials", "true");
@@ -193,6 +206,21 @@ export default async function handler(req: any, res: any) {
     }
 
     const ai = getGenAI();
+
+    // Se a chave GEMINI_API_KEY não estiver configurada nas variáveis da Vercel, usa heurística local
+    if (!ai) {
+      const fallbackResults = items.map(auditarHeuristicaLocal);
+      return res.status(200).json({
+        totalAuditados: fallbackResults.length,
+        totalErrosLeitura: fallbackResults.filter((r) => r.status === "ERRO_LEITURA_SISTEMA").length,
+        totalDivergenciasReais: fallbackResults.filter((r) => r.status === "DIVERGENCIA_REAL").length,
+        totalConferidos: fallbackResults.filter((r) => r.status === "CONFERIDO_CORRETO").length,
+        resultados: fallbackResults,
+        tokensUtilizadosEstimados: 0,
+        provedor: "HEURISTICA_INTELIGENTE",
+        aviso: "GEMINI_API_KEY não configurada no ambiente Vercel. Processado com motor heurístico local.",
+      });
+    }
 
     const BATCH_SIZE = 50;
     const allAiParsedResults: any[] = [];

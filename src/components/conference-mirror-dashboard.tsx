@@ -135,7 +135,7 @@ export function ConferenceMirrorDashboard() {
 
     const unsubHistory = subscribeToConferenceDashboardHistory((hist) => {
       setHistoryList(hist)
-    }, 5)
+    })
 
     return () => {
       unsubLatest()
@@ -143,39 +143,14 @@ export function ConferenceMirrorDashboard() {
     }
   }, [])
 
-  // Deduplicação preventiva para garantir que espelhos duplicados gerados quase ao mesmo tempo sejam colapsados em um só
-  const dedupedHistoryList = useMemo(() => {
-    const seenIds = new Set<string>()
-    const seenSignatures = new Set<string>()
-    const result: ConferenceDashboardSnapshot[] = []
-
-    for (const h of historyList) {
-      if (!h || !h.id) continue
-      if (seenIds.has(h.id)) continue
-
-      const roundedVal = Math.round(h.totalValor || 0)
-      const timeBucket = Math.floor((h.timestamp || 0) / 10000)
-      const contentSig = `${h.operatorName || ''}_${h.totalNotas}_${roundedVal}_${timeBucket}`
-
-      if (seenSignatures.has(contentSig)) {
-        continue
-      }
-
-      seenIds.add(h.id)
-      seenSignatures.add(contentSig)
-      result.push(h)
-    }
-    return result
-  }, [historyList])
-
   // Snapshot ativo para visualização: Ao Vivo ou uma sessão histórica selecionada
   const activeSnapshot: ConferenceDashboardSnapshot | null = useMemo(() => {
     if (selectedSnapshotId === 'LIVE' || isLiveMode) {
       return latestLiveSnapshot
     }
-    const found = dedupedHistoryList.find((h) => h.id === selectedSnapshotId)
+    const found = historyList.find((h) => h.id === selectedSnapshotId)
     return found || null
-  }, [isLiveMode, selectedSnapshotId, latestLiveSnapshot, dedupedHistoryList])
+  }, [isLiveMode, selectedSnapshotId, latestLiveSnapshot, historyList])
 
   // Executa a exclusão solicitada no modal
   const handleExecuteDelete = async () => {
@@ -217,15 +192,15 @@ export function ConferenceMirrorDashboard() {
   // Lista de operadores disponíveis no histórico para o filtro
   const availableOperators = useMemo(() => {
     const ops = new Set<string>()
-    dedupedHistoryList.forEach((h) => {
+    historyList.forEach((h) => {
       if (h.operatorName) ops.add(h.operatorName)
     })
     return Array.from(ops)
-  }, [dedupedHistoryList])
+  }, [historyList])
 
   // Histórico filtrado
   const filteredHistory = useMemo(() => {
-    return dedupedHistoryList.filter((h) => {
+    return historyList.filter((h) => {
       if (historyOperatorFilter !== 'all' && h.operatorName !== historyOperatorFilter) {
         return false
       }
@@ -239,7 +214,7 @@ export function ConferenceMirrorDashboard() {
         (Array.isArray(h.destinatarios) && h.destinatarios.some((d) => d?.fullName && d.fullName.toLowerCase().includes(q)))
       )
     })
-  }, [dedupedHistoryList, historyOperatorFilter, historySearchQuery])
+  }, [historyList, historyOperatorFilter, historySearchQuery])
 
   // Notas filtradas da tabela principal do snapshot ativo
   const filteredNotes = useMemo(() => {
@@ -506,7 +481,7 @@ export function ConferenceMirrorDashboard() {
               <History className="h-3.5 w-3.5 text-indigo-500" />
               <span>Consultar Dashboards Anteriores</span>
               <span className="bg-zinc-200 dark:bg-zinc-800 text-[10px] px-1.5 py-0.2 rounded-full font-bold">
-                {dedupedHistoryList.length}
+                {historyList.length}
               </span>
               {showHistoryPanel ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
             </Button>
@@ -541,29 +516,9 @@ export function ConferenceMirrorDashboard() {
                   title={isLiveMode ? "Excluir espelho ao vivo em exibição" : "Excluir esta sessão histórica"}
                 >
                   <Trash2 className="h-3.5 w-3.5 text-red-600 dark:text-red-400" />
-                  <span>Excluir Este Espelho</span>
+                  <span>Excluir Espelho</span>
                 </Button>
               </>
-            )}
-
-            {/* Botão de Excluir Todos os Espelhos do Banco de Dados */}
-            {(dedupedHistoryList.length > 0 || latestLiveSnapshot !== null) && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setConfirmDelete({
-                    type: 'all',
-                    id: 'ALL',
-                    title: 'Excluir Todos os Espelhos do Banco de Dados',
-                  })
-                }}
-                className="bg-red-50 text-red-700 hover:bg-red-100 hover:text-red-800 dark:bg-red-950/50 dark:text-red-300 dark:hover:bg-red-900/70 border-red-300 dark:border-red-800 text-xs font-semibold flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
-                title="Exclui todos os espelhos (conference_dashboards) do Firebase Realtime Database e limpa o armazenamento"
-              >
-                <Trash2 className="h-3.5 w-3.5 text-red-600 dark:text-red-400" />
-                <span>Excluir Todos os Espelhos do Banco</span>
-              </Button>
             )}
           </div>
         </div>
@@ -585,22 +540,20 @@ export function ConferenceMirrorDashboard() {
               </div>
 
               <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
+                <button
                   onClick={() => {
                     setConfirmDelete({
                       type: 'all',
                       id: 'ALL',
-                      title: 'Excluir Todos os Espelhos do Banco de Dados',
+                      title: 'Limpar Todo o Histórico de Espelhos',
                     })
                   }}
-                  className="text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 hover:text-red-800 border-red-200 dark:bg-red-950/40 dark:text-red-300 dark:border-red-800 flex items-center gap-1.5 cursor-pointer shadow-2xs transition-colors"
-                  title="Exclui todos os espelhos do banco Firebase e limpa o histórico"
+                  className="text-[11px] text-zinc-500 hover:text-red-600 flex items-center gap-1 p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md cursor-pointer transition-colors"
+                  title="Limpar histórico de dashboards"
                 >
-                  <Trash2 className="h-3.5 w-3.5 text-red-600 dark:text-red-400" />
-                  <span>Excluir Todos os Espelhos do Banco</span>
-                </Button>
+                  <Trash2 className="h-3 w-3" />
+                  Limpar Histórico
+                </button>
               </div>
             </div>
 
@@ -759,19 +712,19 @@ export function ConferenceMirrorDashboard() {
             </p>
           </div>
 
-          {dedupedHistoryList.length > 0 && (
+          {historyList.length > 0 && (
             <div className="pt-2 flex flex-wrap items-center justify-center gap-2">
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => {
-                  setSelectedSnapshotId(dedupedHistoryList[0].id)
+                  setSelectedSnapshotId(historyList[0].id)
                   setIsLiveMode(false)
                 }}
                 className="text-xs font-semibold gap-1.5 cursor-pointer bg-zinc-50 hover:bg-zinc-100 dark:bg-zinc-800 dark:hover:bg-zinc-700"
               >
                 <History className="h-3.5 w-3.5 text-indigo-500" />
-                Visualizar Última Sessão Salva ({dedupedHistoryList[0].dateFormatted})
+                Visualizar Última Sessão Salva ({historyList[0].dateFormatted})
               </Button>
               <Button
                 variant="ghost"
@@ -779,7 +732,7 @@ export function ConferenceMirrorDashboard() {
                 onClick={() => setShowHistoryPanel(true)}
                 className="text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 gap-1 cursor-pointer"
               >
-                Consultar Histórico ({dedupedHistoryList.length})
+                Consultar Histórico ({historyList.length})
                 <ChevronDown className="h-3.5 w-3.5" />
               </Button>
             </div>
@@ -1774,39 +1727,19 @@ export function ConferenceMirrorDashboard() {
               <div>
                 <DialogTitle className="text-base font-bold text-zinc-900 dark:text-zinc-100">
                   {confirmDelete?.type === 'all'
-                    ? 'Excluir Todos os Espelhos do Banco de Dados?'
+                    ? 'Limpar Todo o Histórico de Espelhos?'
                     : confirmDelete?.type === 'live'
                     ? 'Excluir Espelho em Tempo Real?'
                     : 'Excluir Sessão Histórica do Espelho?'}
                 </DialogTitle>
                 <DialogDescription className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
                   {confirmDelete?.type === 'all'
-                    ? 'Esta ação removerá permanentemente a pasta conference_dashboards e o espelho ativo do Firebase Realtime Database.'
+                    ? 'Esta ação apagará permanentemente todos os espelhos e históricos salvos no banco de dados e sincronizará com todas as abas.'
                     : 'Esta ação removerá permanentemente o espelho e todas as suas notas fiscais conferidas deste painel.'}
                 </DialogDescription>
               </div>
             </div>
           </DialogHeader>
-
-          {confirmDelete && confirmDelete.type === 'all' && (
-            <div className="my-2 p-3 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 rounded-xl space-y-2 text-xs text-red-900 dark:text-red-200">
-              <div className="flex items-center gap-2 font-semibold">
-                <AlertTriangle className="h-4 w-4 text-red-600 shrink-0" />
-                <span>Exclusão Total do Banco de Dados Firebase:</span>
-              </div>
-              <p className="text-[11px] text-zinc-600 dark:text-zinc-400">
-                Os seguintes nós serão apagados diretamente na nuvem Firebase Realtime Database e nos navegadores:
-              </p>
-              <ul className="list-disc pl-5 font-mono text-[11px] space-y-0.5 text-zinc-800 dark:text-zinc-200">
-                <li><code>vlic_telemetry/conference_dashboards</code> (todos os espelhos)</li>
-                <li><code>vlic_telemetry/latest_conference_dashboard</code> (espelho ativo)</li>
-              </ul>
-              <div className="pt-1 text-[11px] font-semibold text-red-700 dark:text-red-400 flex items-center gap-1">
-                <span>Total de espelhos a serem excluídos:</span>
-                <span className="font-bold underline">{dedupedHistoryList.length + (latestLiveSnapshot ? 1 : 0)} espelho(s)</span>
-              </div>
-            </div>
-          )}
 
           {confirmDelete && confirmDelete.type !== 'all' && (
             <div className="my-2 p-3 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl space-y-1.5 text-xs">
@@ -1864,7 +1797,7 @@ export function ConferenceMirrorDashboard() {
                   <Trash2 className="h-3.5 w-3.5" />
                   <span>
                     {confirmDelete?.type === 'all'
-                      ? 'Sim, Excluir Todos do Banco'
+                      ? 'Sim, Limpar Tudo'
                       : 'Sim, Excluir Espelho'}
                   </span>
                 </>

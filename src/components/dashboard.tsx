@@ -27,7 +27,7 @@ import {
   matchTransbordoFromText,
   subscribeCadastrosChanges,
 } from "@/lib/cadastros-logisticos-service"
-import { getExplicitGuarujaTerminalCode } from "@/lib/terminal-utils"
+import { extractTerminalFromDeliveryRule } from "@/lib/terminal-utils"
 
 import {
   BarChart,
@@ -206,11 +206,14 @@ export function getNoteDetails(
   let terminal = nfe?.terminalEntrega || parsed?.terminalEntrega || "Não Informado"
   let transbordo = nfe?.transbordo || parsed?.transbordo || "Não Informado"
   let retirada = parsed?.retirada || ""
-  const explicitTerminalCode = getExplicitGuarujaTerminalCode(`${infCpl} ${rawXml} ${f.rawSnippet || ""}`)
-  if (explicitTerminalCode === 'TEAG') {
-    terminal = "TEAG - TERMINAL DE ACUCAR DO GUARUJA"
-  } else if (explicitTerminalCode === 'TEG') {
-    terminal = "TEG - TERMINAL DE EXPORTAÇÃO DO GUARUJÁ"
+
+  const fullDocText = `${infCpl} ${rawXml} ${f.rawSnippet || ""}`
+  // Extração 100% mecânica pelas até 15 palavras imediatamente após "alfandegado", "afadegado", "entrega:" e marcadores
+  if (terminal === "Não Informado" || !terminal) {
+    const mechTerminal = extractTerminalFromDeliveryRule(fullDocText)
+    if (mechTerminal) {
+      terminal = mechTerminal
+    }
   }
 
   // Se o terminal foi indevidamente extraído como UBERABA / TIUB, corrigir para transbordo
@@ -226,24 +229,20 @@ export function getNoteDetails(
     terminal = "Não Informado"
   }
 
-  // Transbordo NUNCA pode ser terminal portuário (TEAG, TEG, TES, CLI, Santos, Guarujá)
+  // Se o transbordo for inválido e o terminal estiver vazio, buscar terminal mecanicamente
   const isPortTerminalName = (val: string): boolean => {
     const u = (val || "").toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    return /\bTEAG\b|\bTEG\b|\bTES\b|\bTGG\b|\bCLI\b|\bTIPLAM\b|\bDP WORLD\b|\bECOPORTO\b|\bBTP\b|\bTERMINAL 124\b|\bT-124\b|\bT124\b|TERMINAL.*EXPORTA[CÇ]|GUARUJ[AÁ]|SANTOS/i.test(u)
+    return /\bTEAG\b|\bTEG\b|\bTES\b|\bTGG\b|\bCLI\b|\bTIPLAM\b|\bDP WORLD\b|\bECOPORTO\b|\bBTP\b|\bTERMINAL 124\b|\bT-124\b|\bT124\b|\bULTRAFERTIL\b|\bULTRAF[EÉ]RTIL\b|TERMINAL.*EXPORTA[CÇ]|GUARUJ[AÁ]|SANTOS/i.test(u)
   }
 
   if (isPortTerminalName(transbordo)) {
     if (terminal === "Não Informado" || !terminal) {
-      terminal = transbordo
+      const mechTerminal = extractTerminalFromDeliveryRule(fullDocText)
+      if (mechTerminal) {
+        terminal = mechTerminal
+      }
     }
     transbordo = "Não Informado"
-  }
-
-  // Se o terminal foi rotulado como TEG mas a nota é de açúcar, corrigir para TEAG
-  if (!explicitTerminalCode && terminal.includes('TEG') && !terminal.includes('TEAG')) {
-    if (/ACUCAR|AÇÚCAR|04\.?721\.?589\/?0001-?78|BENTO\s*PEDRO|335\.?127\.?598\.?119|TERMINAL.*EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR/i.test(infCpl)) {
-      terminal = "TEAG - TERMINAL DE ACUCAR DO GUARUJA"
-    }
   }
 
   if (transbordo === "Não Informado" || !transbordo || isPortTerminalName(transbordo)) {
@@ -271,27 +270,6 @@ export function getNoteDetails(
     else if (/COMPANHIA\s*AUXILIAR|CIA\s*AUXILIAR/i.test(fullContext)) transbordo = "COMPANHIA AUXILIAR DE ARMAZENS GERAIS"
   }
 
-  if (terminal === "Não Informado" || !terminal) {
-    if (
-      /TEAG|TERM.*EXPORTACAO.*ACUCAR|TERMINAL.*EXPORTA[CÇ][AÃ]O.*A[CÇ][UÚ]CAR|04\.?721\.?589\/?0001-?78|335\.?127\.?598\.?119|BENTO\s*PEDRO/i.test(infCpl) ||
-      ((/GUARUJA|GUARUJÁ/i.test(infCpl)) && (/ACUCAR|AÇÚCAR/i.test(infCpl)))
-    ) {
-      terminal = "TEAG - TERMINAL DE ACUCAR DO GUARUJA"
-    } else if (/TES\b|TERMINAL.*EXPORTADOR.*SANTOS|TES\s*TERMINAL|18\.?845\.?076\/?0001-?83/i.test(infCpl)) {
-      terminal = "TES - TERMINAL EXPORTADOR DE SANTOS"
-    } else if (/TEG\b|TERMINAL.*EXPORTADORES.*GRANDE/i.test(infCpl)) {
-      terminal = "TEG - TERMINAL DE EXPORTAÇÃO DO GUARUJÁ"
-    } else if (/CLI|TERMARES/i.test(infCpl)) {
-      terminal = "CLI - CORREDOR LOGÍSTICA INTEGRADA"
-    } else if (/T-124|T124/i.test(infCpl)) {
-      terminal = "TERMINAL 124"
-    } else if (/RUMO/i.test(infCpl)) {
-      terminal = "TERMINAL RUMO"
-    } else if (/VLI/i.test(infCpl)) {
-      terminal = "TERMINAL VLI"
-    }
-  }
-
   // Identificador da nota para vincular com overrides da IA
   const noteKey = chave && chave !== "Sem Chave" ? chave : (f.fileName || `${numero}_${serie}`)
   const override = overrides
@@ -302,11 +280,7 @@ export function getNoteDetails(
   const aiCamposAjustados: string[] = []
 
   if (override) {
-    if (override.terminal && override.terminal !== terminal) {
-      terminal = override.terminal
-      isAIAjustado = true
-      aiCamposAjustados.push("Terminal")
-    }
+    // A busca por terminal é 100% mecânica: a IA NÃO sobrescreve o terminal
     if (override.transbordo && override.transbordo !== transbordo) {
       transbordo = override.transbordo
       isAIAjustado = true
@@ -899,7 +873,6 @@ export function Dashboard({ files }: DashboardProps) {
         if (res.camposAjustados && res.camposAjustados.length > 0) {
           adjustedCount++
           newOverrides[res.id] = {
-            terminal: res.terminalCorrigido,
             transbordo: res.transbordoCorrigido,
             destNome: res.destinatarioCorrigido,
             retirada: res.retiradaCorrigida,
